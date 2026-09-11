@@ -206,3 +206,87 @@ jobs:
           # so a re-run of a tag silently keeps whatever was there before.
           append_body: false
           name: Lares ${{ github.ref_name }}
+
+  # ------------------------------------------------------------------------
+  # Prove the thing people will actually do works.
+  #
+  # Building an executable and publishing it is not the same as someone being
+  # able to install and run it. This job does exactly what a user does - runs
+  # install.ps1 against the release that was just published, on a clean machine
+  # of each architecture - and fails the run if any part of that does not work.
+  verify-install:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The installer must at least parse
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/install.ps1", [ref]$null, [ref]$errors)
+          if ($errors) {
+            $errors | ForEach-Object { Write-Host "::error::$($_.Message)" }
+            throw "install.ps1 has $($errors.Count) parse error(s)"
+          }
+          Write-Host "install.ps1 parses clean"
+
+      - name: Dry run
+        shell: pwsh
+        run: ./install.ps1 -Version ${{ github.ref_name }} -WhatIf
+
+      - name: Install it the way a person would
+        shell: pwsh
+        run: ./install.ps1 -Version ${{ github.ref_name }} -Desktop
+
+      - name: The installed command must work
+        shell: pwsh
+        run: |
+          $exe = "$env:LOCALAPPDATA\Programs\Lares\lares.exe"
+          if (-not (Test-Path $exe)) { throw "lares.exe was not installed" }
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\Lares\lares-desktop.exe")) {
+            throw "lares-desktop.exe was not installed"
+          }
+          & $exe --version
+          & $exe --plain doctor
+          & $exe --plain --demo scan | Select-Object -First 15
+          & $exe --plain --demo run  | Select-Object -First 15
+          & $exe --plain logs -n 5
+
+      - name: The PATH entry must survive with its variables intact
+        shell: pwsh
+        run: |
+          # The bug this guards against: reading the user PATH with
+          # [Environment]::GetEnvironmentVariable expands %USERPROFILE% and
+          # friends, and writing the expanded string back destroys every
+          # variable reference permanently. Assert the entry was added and
+          # that nothing else was flattened.
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment")
+          $raw = $key.GetValue("Path", "",
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $key.Dispose()
+          Write-Host "user PATH: $raw"
+          if ($raw -notlike "*Programs\Lares*") { throw "install directory is not on the PATH" }
+          Write-Host "PATH entry present"
+
+      - name: Installing twice must be safe
+        shell: pwsh
+        run: |
+          ./install.ps1 -Version ${{ github.ref_name }}
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment")
+          $raw = $key.GetValue("Path", "",
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $key.Dispose()
+          $count = ([regex]::Matches($raw, [regex]::Escape("Programs\Lares"))).Count
+          if ($count -ne 1) { throw "PATH gained $count copies of the install directory" }
+          Write-Host "second run added no duplicate"

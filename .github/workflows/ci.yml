@@ -154,3 +154,28 @@ jobs:
               sys.exit(1)
           print("The judge is sane.")
           PY
+
+  installer:
+    name: The installer parses and resolves a release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A syntax error in install.ps1 is invisible until someone pipes it into
+      # iex, at which point it is their problem rather than ours. Parsing it on
+      # every push is cheap; the full end-to-end install runs on release.
+      - name: Parse
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/install.ps1", [ref]$null, [ref]$errors)
+          if ($errors) {
+            $errors | ForEach-Object { Write-Host "::error::$($_.Message)" }
+            throw "install.ps1 has $($errors.Count) parse error(s)"
+          }
+          Write-Host "install.ps1 parses clean"
+
+      - name: Resolve the latest release and report what it would do
+        shell: pwsh
+        run: ./install.ps1 -WhatIf
