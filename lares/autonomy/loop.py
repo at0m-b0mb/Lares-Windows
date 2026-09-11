@@ -252,14 +252,30 @@ class Agent:
                 refusal=outcome.refusal_reason,
             )
 
-            # Two rollbacks inside a single cycle is already enough evidence that
-            # this machine does not match the catalogue. Stop here rather than
-            # working through the remaining eight actions finding out.
-            if len(cycle.reverted) >= 2:
+            # Two changes going wrong inside a single cycle is already enough
+            # evidence that this machine does not match the catalogue. Stop here
+            # rather than working through the remaining eight finding out.
+            #
+            # A failed remediation counts, and so does a rollback that could not
+            # be completed - that one leaves a change in place that nobody asked
+            # to keep, which is the strongest possible reason to stop touching
+            # this machine.
+            gone_wrong = len(cycle.reverted) + sum(
+                1 for o in cycle.outcomes if o.status is Status.FAILED)
+            if gone_wrong >= 2:
+                stuck = [o.control_id for o in cycle.outcomes
+                         if o.status is Status.FAILED and o.change_in_place]
                 cycle.halted = (
-                    "stopped early: two changes in this cycle had to be undone"
+                    f"stopped early: {gone_wrong} changes in this cycle went wrong"
                 )
+                if stuck:
+                    cycle.halted += (
+                        f", and {', '.join(stuck)} could not be undone and is still "
+                        "in place"
+                    )
                 self._emit("cycle", cycle.halted)
+                logs.get().warn("cycle", cycle.halted, cycle=cycle.cycle_id,
+                                stuck=stuck)
                 break
 
     def _on_stage(self, report: Report) -> None:

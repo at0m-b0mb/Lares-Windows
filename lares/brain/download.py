@@ -95,6 +95,18 @@ def fetch(spec: ModelSpec, progress: Progress | None = None,
     if spec.path.exists() and not force:
         return verify(spec, progress)
 
+    if not spec.repo:
+        # The embedded spec has no upstream - it came out of the executable.
+        # Without this the URL would be built with an empty path segment and
+        # the failure would look like a network problem rather than a bug.
+        return Result(False, message=(
+            f"{spec.name} has no download source; it is carried inside this "
+            "executable rather than fetched"
+        ))
+
+    if not spec.url.lower().startswith("https://"):
+        return Result(False, message=f"refusing a non-HTTPS model URL: {spec.url}")
+
     target = spec.path
     partial = target.with_suffix(target.suffix + ".part")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +125,17 @@ def fetch(spec: ModelSpec, progress: Progress | None = None,
 
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
+            # Hugging Face redirects large files to a CDN, and urllib follows
+            # redirects without caring whether the scheme survives. A redirect
+            # that lands on http:// would put the weights on the wire in clear,
+            # so the scheme is checked after the hops rather than before.
+            final = getattr(response, "url", "") or spec.url
+            if not final.lower().startswith("https://"):
+                partial.unlink(missing_ok=True)
+                return Result(False, message=(
+                    f"the download was redirected to a non-HTTPS address ({final}) "
+                    "and was abandoned"
+                ))
             total = int(response.headers.get("Content-Length", 0) or needed)
             with partial.open("wb") as fh:
                 while chunk := response.read(CHUNK):

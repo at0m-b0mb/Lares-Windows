@@ -7,12 +7,11 @@ about what the agent is allowed to do.
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from .core import RiskTier
-from .winsys import data_dir
+from .winsys import data_dir, read_json, write_json_atomic
 
 
 @dataclass
@@ -93,10 +92,7 @@ def path() -> Path:
 
 def load() -> Settings:
     """Read settings, falling back to defaults for anything missing or broken."""
-    try:
-        raw = json.loads(path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return Settings()
+    raw = read_json(path())
     if not isinstance(raw, dict):
         return Settings()
 
@@ -106,9 +102,15 @@ def load() -> Settings:
     return settings
 
 
-def save(settings: Settings) -> None:
+def save(settings: Settings) -> bool:
+    """Persist settings atomically.
+
+    Returns whether it stuck. A half-written settings file parses as broken and
+    falls back to defaults, which would quietly discard an excluded-control list
+    and start applying controls the operator had turned off.
+    """
     settings.validate()
-    path().write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")
+    return write_json_atomic(path(), asdict(settings))
 
 
 def describe(settings: Settings) -> list[tuple[str, str]]:

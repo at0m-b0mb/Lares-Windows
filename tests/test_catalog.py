@@ -329,3 +329,57 @@ def test_scan_worst_reports_the_worst_finding():
     ])
     assert scan.worst is Severity.HIGH
     assert Scan().worst is Severity.INFO
+
+
+# --------------------------------------------------------------------------
+# The PowerShell itself
+#
+# None of this can run PowerShell, so it checks what is checkable statically.
+# These are the mistakes that would otherwise surface as a runtime failure on
+# a user's machine, in the middle of an unattended change.
+# --------------------------------------------------------------------------
+
+def test_every_probe_emits_json():
+    """The executor parses probe output as JSON. A probe that prints prose
+    reads as an unusable probe, and the control is silently never fixed."""
+    catalog = loader.load()
+    for control in catalog:
+        assert "ConvertTo-Json" in control.detect, f"{control.id} probe emits no JSON"
+
+
+def test_every_script_is_structurally_balanced():
+    catalog = loader.load()
+    for control in catalog:
+        for label in ("detect", "remediate", "rollback"):
+            body = getattr(control, label)
+            if not body:
+                continue
+            text = "\n".join(
+                line.split("#")[0] if line.strip().startswith("#") else line
+                for line in body.splitlines()
+            )
+            for opener, closer, name in (("{", "}", "braces"),
+                                         ("(", ")", "parentheses"),
+                                         ("[", "]", "brackets")):
+                assert text.count(opener) == text.count(closer), (
+                    f"{control.id}.{label} has unbalanced {name}")
+            assert text.count("'") % 2 == 0, (
+                f"{control.id}.{label} has an odd number of single quotes")
+
+
+def test_every_parameter_is_supplied_by_its_own_probe():
+    """A remediation takes its parameters from the finding its probe produced.
+
+    If the probe never emits a parameter the fix needs, rendering fails at the
+    moment of remediation - after the snapshot, with the machine already
+    committed to the attempt. The loader cannot catch this because it only
+    checks that placeholders are *declared*, not that they are ever *filled*.
+    """
+    catalog = loader.load()
+    for control in catalog:
+        if not control.params:
+            continue
+        emitted = set(re.findall(r"\b([a-z_][a-z0-9_]*)\s*=", control.detect))
+        for spec in control.params:
+            assert spec.name in emitted, (
+                f"{control.id} needs '{spec.name}' but its probe never emits it")

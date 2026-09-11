@@ -29,6 +29,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -297,6 +298,45 @@ def state_dir(name: str) -> Path:
     path = data_dir() / name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def write_json_atomic(path: Path, payload: Any) -> bool:
+    """Write JSON so that a crash can never leave a half-written state file.
+
+    ``write_text`` truncates the file and then writes into it, so a process
+    killed in between leaves valid-looking JSON that is actually a fragment -
+    and every loader here falls back to defaults when parsing fails. For the
+    circuit breaker that is the worst possible failure: a corrupt breaker.json
+    reads as "not tripped", which silently re-arms autonomy on a machine that
+    had just halted itself.
+
+    So: write a sibling temporary file, flush it to the platter, then rename.
+    ``os.replace`` is atomic on POSIX and on Windows, so a reader sees either
+    the old file or the new one and never a fragment.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def read_json(path: Path, default: Any = None) -> Any:
+    """Read a JSON state file, returning *default* if it is missing or broken."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
 
 
 def os_caption() -> str:

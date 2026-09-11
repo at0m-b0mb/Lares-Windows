@@ -97,16 +97,36 @@ def _safe_name(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", path)[:120]
 
 
+#: Distinguishes snapshots taken inside the same second.
+_sequence = 0
+
+
 def take(script: str, label: str = "") -> Snapshot:
-    """Capture whatever state *script* is about to modify."""
+    """Capture whatever state *script* is about to modify.
+
+    Never raises. A snapshot that cannot be written is reported as a failure so
+    the executor refuses that one action; letting an OSError out of here would
+    end the whole cycle and trip the breaker over a full disk.
+
+    The id carries a counter as well as a timestamp because two changes to the
+    same control inside one second would otherwise share a directory and the
+    second would overwrite the first's captured state.
+    """
+    global _sequence
+    _sequence += 1
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     suffix = _safe_name(label) if label else "change"
-    snapshot_id = f"{stamp}-{suffix}"
+    snapshot_id = f"{stamp}-{_sequence:03d}-{suffix}"
     directory = state_dir("snapshots") / snapshot_id
-    directory.mkdir(parents=True, exist_ok=True)
-    snap = Snapshot(snapshot_id=snapshot_id, directory=directory)
 
-    (directory / "script.ps1").write_text(script, encoding="utf-8")
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        snap = Snapshot(snapshot_id=snapshot_id, directory=directory)
+        (directory / "script.ps1").write_text(script, encoding="utf-8")
+    except OSError as exc:
+        snap = Snapshot(snapshot_id=snapshot_id, directory=directory)
+        snap.failures.append(f"could not write the snapshot directory: {exc}")
+        return snap
 
     if is_demo():
         snap.captured.append("demo (nothing real to capture)")
@@ -141,7 +161,10 @@ def take(script: str, label: str = "") -> Snapshot:
         _capture(snap, "defender preferences",
                  "Get-MpPreference | ConvertTo-Json -Depth 4 -Compress", "defender.json")
 
-    _prune()
+    try:
+        _prune()
+    except OSError:
+        pass          # housekeeping failing is not a reason to refuse a change
     return snap
 
 

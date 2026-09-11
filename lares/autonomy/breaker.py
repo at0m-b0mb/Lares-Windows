@@ -18,12 +18,11 @@ agent that has just wedged something is exactly the one likely to be restarted.
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..core import Cycle, Status, utcnow
-from ..winsys import data_dir
+from ..winsys import data_dir, read_json, write_json_atomic
 
 
 @dataclass
@@ -50,18 +49,25 @@ def _path() -> Path:
 
 
 def load() -> State:
+    raw = read_json(_path())
+    if not isinstance(raw, dict):
+        return State()
     try:
-        raw = json.loads(_path().read_text(encoding="utf-8"))
         return State(**{k: v for k, v in raw.items() if k in State.__dataclass_fields__})
-    except (OSError, ValueError, TypeError):
+    except TypeError:
         return State()
 
 
 def save(state: State) -> None:
-    try:
-        _path().write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    """Persist the breaker atomically.
+
+    This one matters more than the other state files. Every loader here treats
+    an unparseable file as "use the defaults", and the default for `tripped` is
+    False - so a breaker.json torn by a power cut would silently re-arm
+    autonomy on the machine that had just halted itself. An atomic replace
+    means a reader sees the old state or the new one, never a fragment.
+    """
+    write_json_atomic(_path(), asdict(state))
 
 
 class Breaker:

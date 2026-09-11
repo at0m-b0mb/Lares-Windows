@@ -35,7 +35,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..winsys import IS_WINDOWS, data_dir, powershell
+from ..winsys import IS_WINDOWS, data_dir, powershell, write_json_atomic
 
 
 @dataclass(frozen=True)
@@ -348,9 +348,14 @@ def load_pins() -> dict[str, str]:
 
 
 def save_pin(filename: str, digest: str) -> None:
+    """Record a model's checksum, atomically.
+
+    A torn pins file parses as empty, which silently downgrades every model on
+    the machine from "verified against a known hash" back to trust-on-first-use.
+    """
     pins = load_pins()
     pins[filename] = digest
-    _pins_path().write_text(json.dumps(pins, indent=2), encoding="utf-8")
+    write_json_atomic(_pins_path(), pins)
 
 
 def expected_digest(spec: ModelSpec) -> str:
