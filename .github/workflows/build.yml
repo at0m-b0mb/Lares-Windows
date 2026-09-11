@@ -14,10 +14,15 @@
 #   lares-arm64.exe             terminal application for Windows on ARM
 #   lares-desktop-arm64.exe     desktop application for Windows on ARM
 #
-# There is no lares-full-arm64.exe on purpose. llama-cpp-python publishes no
-# ARM64 wheel and building it in CI would need the full MSVC ARM64 C++ toolchain
-# for a payload that could not be loaded without it. On ARM64 the built-in
-# planner is the product, and the application says so rather than pretending.
+#   lares-full-arm64.exe        the same, for ARM - only when the backend compiles
+#
+# llama-cpp-python publishes no ARM64 wheel, so the ARM64 job tries to compile
+# one. llama.cpp refuses to build with MSVC on ARM ("use clang"), so the build
+# goes through clang-cl. It is allowed to fail: the slim ARM64 build ships
+# either way, and the application is honest about which one you have.
+#
+# Windows 11 on ARM also runs x64 binaries under emulation, so lares-full-x64.exe
+# works on an ARM machine today - slower, but with the model.
 
 name: build
 
@@ -163,14 +168,36 @@ jobs:
         id: backend
         continue-on-error: true
         shell: pwsh
-        env:
-          CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
         run: |
-          # Only llama-cpp-python is forced to build from source. ":all:" would
-          # apply that to every dependency, which drags in numpy, which needs
-          # Cython, which fails on MSVC ARM64 with a C1083 on a compiler-
-          # generated file - so llama.cpp was never even reached. Everything
-          # else has a perfectly good ARM64 wheel already.
+          # Two things had to be learned the hard way here.
+          #
+          # First, only llama-cpp-python may be forced to build from source.
+          # ":all:" applies that to every dependency, which drags in numpy,
+          # which needs Cython, which fails on MSVC ARM64 with a C1083 on a
+          # compiler-generated file - so llama.cpp was never even reached.
+          #
+          # Second, llama.cpp's own CMake refuses this outright:
+          #   "MSVC is not supported for ARM, use clang"
+          # so the default MSVC toolset cannot build it at all. The image
+          # carries LLVM and Ninja, so clang-cl is used instead.
+          $common = "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF"
+
+          Write-Host "=== attempt 1: Visual Studio generator with the ClangCL toolset ==="
+          $env:CMAKE_GENERATOR = "Visual Studio 17 2022"
+          $env:CMAKE_GENERATOR_TOOLSET = "ClangCL"
+          $env:CMAKE_GENERATOR_PLATFORM = "ARM64"
+          $env:CMAKE_ARGS = $common
+          pip install --no-binary llama-cpp-python llama-cpp-python
+          if ($LASTEXITCODE -eq 0) {
+            python -c "import llama_cpp; print('built llama_cpp', llama_cpp.__version__)"
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+          }
+
+          Write-Host "=== attempt 2: Ninja driving clang-cl directly ==="
+          Remove-Item Env:CMAKE_GENERATOR_TOOLSET, Env:CMAKE_GENERATOR_PLATFORM -ErrorAction SilentlyContinue
+          $env:CMAKE_GENERATOR = "Ninja"
+          $env:CMAKE_ARGS = "$common -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl"
+          & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Launch-VsDevShell.ps1" -Arch arm64 -HostArch arm64 -SkipAutomaticLocation
           pip install --no-binary llama-cpp-python llama-cpp-python
           python -c "import llama_cpp; print('built llama_cpp', llama_cpp.__version__)"
 
