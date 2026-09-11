@@ -32,7 +32,12 @@ class State:
     tripped: bool = False
     tripped_at: str = ""
     reason: str = ""
-    #: Short history of recent cycle verdicts, newest last, for the UI.
+    #: Recent cycles, newest last, as {at, open, fixed, reverted, failed,
+    #: verdict}. Structured rather than prose because the desktop application
+    #: draws the machine's history from it - the backlog coming down over time
+    #: is the clearest evidence that the agent is doing its job.
+    cycles: list[dict] = field(default_factory=list)
+    #: Human-readable notes that are not cycles: halts, resets.
     history: list[str] = field(default_factory=list)
     last_cycle_at: str = ""
     total_cycles: int = 0
@@ -112,10 +117,17 @@ class Breaker:
             self.state.consecutive_bad = 0
         else:
             # Nothing attempted. Not evidence either way, so the count stands.
-            verdict = "quiet (nothing to do)"
+            verdict = "quiet"
 
-        self.state.history.append(f"{utcnow()} {verdict}")
-        self.state.history = self.state.history[-20:]
+        self.state.cycles.append({
+            "at": utcnow(),
+            "open": len(cycle.scan.findings),
+            "fixed": fixed,
+            "reverted": rolled_back,
+            "failed": failed,
+            "verdict": verdict.split()[0],
+        })
+        self.state.cycles = self.state.cycles[-40:]
         save(self.state)
 
     def reset(self, note: str = "reset by the operator") -> None:
