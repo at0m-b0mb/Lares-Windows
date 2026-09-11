@@ -50,12 +50,11 @@ from ..act.guard import Context
 from ..act.journal import Journal
 from ..autonomy.loop import Agent, Event, build
 from ..brain import models
-from ..brain.engine import Engine
 from ..catalog import loader
-from ..core import Cycle, RiskTier, Scan, Status
+from ..core import Cycle, RiskTier, Scan
 from ..report import write_report
 from ..sense import scanner
-from ..version import ETYMOLOGY, NAME, TAGLINE, VERSION
+from ..version import ETYMOLOGY, NAME, VERSION
 from ..winsys import current_user, is_demo, is_elevated
 from . import theme, widgets
 from .theme import Mode, space
@@ -405,7 +404,7 @@ class HearthPage(Page):
 
     def refresh(self) -> None:
         window = self.window_ref
-        scan, cycle, mode = window.scan, window.cycle, window.mode
+        scan, cycle = window.scan, window.cycle
         if scan is None:
             return
 

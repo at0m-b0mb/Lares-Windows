@@ -375,6 +375,12 @@ class Outcome:
     #: State the detection probe reported before and after.
     before: str = ""
     after: str = ""
+    #: True when a change is still on the machine at the end of this attempt.
+    #: This is NOT the same as the status. A rollback that itself fails leaves
+    #: the change in place while the attempt is over, and recording that as
+    #: "rolled back" would put a lie in the journal and hide the change from
+    #: the undo list - which is the one place someone would go to fix it.
+    change_in_place: bool = False
     duration_ms: int = 0
     at: str = field(default_factory=utcnow)
     action_id: str = field(default_factory=lambda: new_id("act"))

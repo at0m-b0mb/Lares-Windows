@@ -13,7 +13,6 @@ needed to understand what was wrong with it.
 from __future__ import annotations
 
 import html
-import json
 from pathlib import Path
 
 from .core import Cycle, Scan, Severity, Status, dumps

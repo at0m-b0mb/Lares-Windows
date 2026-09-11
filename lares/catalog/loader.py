@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
@@ -36,6 +37,7 @@ from typing import Any, Iterator
 import yaml
 
 from ..core import Control, ParamSpec, RiskTier, Severity
+
 
 def _controls_dir() -> Path:
     """Where the control YAML lives, in a checkout or inside a frozen build.

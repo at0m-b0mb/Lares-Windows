@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
-import os
 import platform
 import shutil
 import sys

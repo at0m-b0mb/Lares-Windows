@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any
 
 from .core import RiskTier
 from .winsys import data_dir

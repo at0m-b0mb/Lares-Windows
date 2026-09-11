@@ -21,7 +21,7 @@ from typing import Any
 from .. import config as config_mod
 from .. import logs, preflight
 from ..autonomy.breaker import Breaker
-from ..autonomy.loop import Agent, Event, build
+from ..autonomy.loop import Event, build
 from ..brain import download, models
 from ..brain.engine import Engine, strip_fence
 from ..brain.plan import Planner
@@ -46,7 +46,14 @@ SEVERITY_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM,
 # Shared setup
 # --------------------------------------------------------------------------
 
-def _settings_from(args: argparse.Namespace) -> config_mod.Settings:
+def _settings_from(args: argparse.Namespace,
+                   console: Console | None = None) -> config_mod.Settings:
+    """Settings from disk, overridden by whatever was passed on the line.
+
+    ``validate`` clamps anything out of range and reports what it changed. That
+    report is surfaced rather than dropped: someone who typed --budget 500 and
+    silently got 8 would reasonably conclude the flag does nothing.
+    """
     settings = config_mod.load()
     for name in ("ceiling", "budget", "interval_minutes", "model_tier"):
         value = getattr(args, name, None)
@@ -56,7 +63,10 @@ def _settings_from(args: argparse.Namespace) -> config_mod.Settings:
         settings.dry_run = True
     if getattr(args, "domain", None):
         settings.domains = list(args.domain)
-    corrections = settings.validate()
+    for correction in settings.validate():
+        logs.get().warn("config", correction)
+        if console is not None:
+            console.warn(correction)
     return settings
 
 
@@ -79,7 +89,7 @@ def _banner(console: Console, settings: config_mod.Settings, note: str) -> None:
 
 def cmd_scan(args: argparse.Namespace, console: Console) -> int:
     catalog = loader.load()
-    settings = _settings_from(args)
+    settings = _settings_from(args, console)
     console.rule(f"Lares {VERSION} - scan")
 
     with console.status("Checking the machine") as status:
@@ -139,7 +149,7 @@ def _show_scan(console: Console, scan: Scan, catalog, verbose: bool = False) -> 
 
 def cmd_plan(args: argparse.Namespace, console: Console) -> int:
     catalog = loader.load()
-    settings = _settings_from(args)
+    settings = _settings_from(args, console)
     engine, decision = Engine.autoselect(prefer=settings.model_tier)
     note = decision.reason if decision.spec else "no model"
     _banner(console, settings, engine.status if decision.spec else note)
@@ -189,7 +199,7 @@ def _show_plan(console: Console, plan, catalog, planner=None) -> None:
 
 def cmd_run(args: argparse.Namespace, console: Console) -> int:
     catalog = loader.load()
-    settings = _settings_from(args)
+    settings = _settings_from(args, console)
     agent, note = build(settings, catalog, listener=_make_listener(console),
                         with_model=not args.no_model)
     _banner(console, settings, note)
@@ -209,7 +219,7 @@ def cmd_run(args: argparse.Namespace, console: Console) -> int:
 
 def cmd_watch(args: argparse.Namespace, console: Console) -> int:
     catalog = loader.load()
-    settings = _settings_from(args)
+    settings = _settings_from(args, console)
     agent, note = build(settings, catalog, listener=_make_listener(console),
                         with_model=not args.no_model)
     _banner(console, settings, note)

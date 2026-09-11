@@ -39,13 +39,24 @@ class Entry:
     host: str = ""
     at: str = field(default_factory=utcnow)
 
+    #: Whether the reader found an explicit change_in_place field. Entries
+    #: written before that field existed do not have one, and are judged the
+    #: old way rather than being silently treated as "nothing in place".
+    has_change_flag: bool = True
+
     @property
     def undoable(self) -> bool:
-        """True when this entry left a change in place that we could still undo."""
-        return (
-            self.outcome.status in (Status.VERIFIED, Status.UNVERIFIED)
-            and bool(self.outcome.rollback_script.strip())
-        )
+        """True when this entry left a change in place that we could still undo.
+
+        A failed rollback is the case that makes this worth being careful about:
+        the status says the attempt ended badly, but the change is still on the
+        machine and this is the list someone would use to try again.
+        """
+        if not self.outcome.rollback_script.strip():
+            return False
+        if self.has_change_flag:
+            return self.outcome.change_in_place
+        return self.outcome.status in (Status.VERIFIED, Status.UNVERIFIED)
 
 
 class Journal:
@@ -130,12 +141,14 @@ class Journal:
                     rollback_script=raw.get("rollback_script", ""),
                     before=raw.get("before", ""),
                     after=raw.get("after", ""),
+                    change_in_place=bool(raw.get("change_in_place", False)),
                     duration_ms=int(raw.get("duration_ms", 0) or 0),
                     at=raw.get("at", ""),
                     action_id=raw.get("action_id", ""),
                 )
                 yield Entry(
                     outcome=outcome,
+                    has_change_flag="change_in_place" in raw,
                     cycle_id=payload.get("cycle_id", ""),
                     control_title=payload.get("control_title", ""),
                     rationale=payload.get("rationale", ""),

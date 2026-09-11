@@ -24,9 +24,8 @@ from __future__ import annotations
 import ctypes
 import sys
 
-from .. import logs, preflight
+from .. import logs
 from ..catalog import loader
-from ..sense import scanner
 from ..version import NAME, TAGLINE, VERSION
 from ..winsys import current_user, is_demo, is_elevated
 from .render import Console

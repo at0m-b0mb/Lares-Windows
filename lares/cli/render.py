@@ -13,7 +13,6 @@ exactly the machine that most needs hardening.
 from __future__ import annotations
 
 import contextlib
-import os
 import shutil
 import sys
 from typing import Any, Iterator

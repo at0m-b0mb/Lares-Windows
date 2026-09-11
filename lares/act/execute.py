@@ -23,7 +23,6 @@ at here.
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -273,6 +272,9 @@ class Executor:
         self._say(control.id, "apply", control.title)
         ok, output = self._run(rendered, REMEDIATE_TIMEOUT)
         outcome.output = output
+        # Set before checking `ok`: a script that failed part way through has
+        # still changed something, and that is exactly when the undo matters.
+        outcome.change_in_place = True
         if ok and is_demo():
             demo_data.mark_fixed(control.id)
 
@@ -288,20 +290,28 @@ class Executor:
         after = read_probe(control, clean)
         outcome.after = after.observed or after.error
 
-        regressions = health_mod.compare(self.baseline, health_mod.capture())
+        current_health = health_mod.capture()
+        regressions = health_mod.compare(self.baseline, current_health)
         if regressions:
             outcome.message = (
                 "undone because the machine got worse: "
                 + health_mod.describe(regressions)
             )
-            self._undo(outcome, control, outcome.message)
-            outcome.status = Status.ROLLED_BACK
+            undone = self._undo(outcome, control, outcome.message)
+            outcome.status = Status.ROLLED_BACK if undone else Status.FAILED
             outcome.duration_ms = _ms(started)
             return outcome
 
         if after.usable and after.compliant:
             outcome.status = Status.VERIFIED
             outcome.message = f"fixed: {after.observed or control.title}"
+            # This change is staying, and the machine is still healthy with it
+            # applied. That is the new known-good state, so the next action in
+            # this cycle is compared against it rather than against how the
+            # machine looked several changes ago - otherwise a regression caused
+            # by an earlier action gets blamed on a later one, and the innocent
+            # change is the one that gets rolled back.
+            self.baseline = current_health
         elif control.deferred_effect:
             # Expected: the value is written but Windows has not read it yet.
             outcome.status = Status.UNVERIFIED
@@ -309,27 +319,36 @@ class Executor:
                 f"applied; takes effect at next {control.effective}. "
                 f"Until then the probe still reports: {after.observed or 'unchanged'}"
             )
+            self.baseline = current_health
         else:
             outcome.message = (
                 "undone because it did not take effect: the problem is still "
                 f"present after the change ({after.observed or after.error})"
             )
-            self._undo(outcome, control, outcome.message)
-            outcome.status = Status.ROLLED_BACK
+            undone = self._undo(outcome, control, outcome.message)
+            outcome.status = Status.ROLLED_BACK if undone else Status.FAILED
 
         outcome.duration_ms = _ms(started)
         return outcome
 
     # -- undo ------------------------------------------------------------
 
-    def _undo(self, outcome: Outcome, control: Control, why: str) -> None:
-        """Put the machine back. Records what happened; never raises."""
+    def _undo(self, outcome: Outcome, control: Control, why: str) -> bool:
+        """Put the machine back. Returns whether it worked; never raises.
+
+        The return value matters more than it looks. A rollback that fails
+        leaves the change on the machine, and the caller has to record that
+        honestly instead of claiming the attempt was rolled back - otherwise
+        the journal says "undone" about a change that is still in force, and
+        the Ledger hides it from the one list someone would use to undo it.
+        """
         if control.rollback_policy == "additive":
             outcome.message += " (nothing to undo; this control only adds state)"
-            return
+            outcome.change_in_place = False
+            return True
         if not outcome.rollback_script:
             outcome.message += " (no rollback script was available)"
-            return
+            return False
 
         self._say(control.id, "rollback", why)
         ok, output = self._run(outcome.rollback_script, ROLLBACK_TIMEOUT)
@@ -337,11 +356,14 @@ class Executor:
             demo_data.mark_unfixed(control.id)
         if ok:
             outcome.message += " - rolled back cleanly"
+            outcome.change_in_place = False
         else:
             outcome.message += (
-                f" - THE ROLLBACK ALSO FAILED ({output[:200]}). State was captured "
-                f"before the change in snapshot {outcome.snapshot_id}."
+                f" - THE ROLLBACK ALSO FAILED ({output[:200]}). The change is still "
+                f"in place. State was captured beforehand in snapshot "
+                f"{outcome.snapshot_id}, and the undo can be retried from the Ledger."
             )
+        return ok
 
     # -- manual undo of a past change -------------------------------------
 
