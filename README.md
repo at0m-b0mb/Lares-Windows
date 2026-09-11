@@ -6,11 +6,12 @@
 
 It looks at what the machine is, decides what to do about it, fixes what it can
 undo, verifies that the fix worked, and puts back anything that made things
-worse. No prompts, no dialogs, no cloud.
+worse. No prompts, no dialogs, no cloud, no account.
 
-[Two applications](#two-applications) · [How it decides](#how-it-decides) ·
-[Why you can leave it running](#why-you-can-leave-it-running) ·
-[The model](#the-model) · [What it will not do](#what-it-will-not-do)
+[Install](#install) · [Two applications](#two-applications) ·
+[How it decides](#how-it-decides) · [Why you can leave it running](#why-you-can-leave-it-running) ·
+[What it writes down](#what-it-writes-down) · [The model](#the-model) ·
+[Will it run here?](#will-it-run-on-my-machine) · [What it will not do](#what-it-will-not-do)
 
 </div>
 
@@ -25,30 +26,86 @@ it constantly, and is not interested in anything else.
 ## The problem this solves
 
 Windows hardening advice exists in enormous quantity and almost nobody applies
-it. The CIS benchmark for Windows 11 is several hundred pages. The reader has to
-work out which items apply to their machine, what each one will break, how to
-undo it, and then do it again in six months. So the firewall stays off after that
-one game needed it, WDigest keeps caching passwords in memory because some
-installer set it in 2016, and a service runs from `C:\Tools\Backup Agent\` with
-no quotes around the path.
+it. The CIS benchmark for Windows 11 runs to several hundred pages. The reader
+has to work out which items apply to their machine, what each one will break, how
+to undo it, and then do the whole thing again in six months. So the firewall
+stays off after that one game needed it, WDigest keeps caching passwords in
+memory because an installer set it in 2016, and a service runs from
+`C:\Tools\Backup Agent\` with no quotes around the path.
 
-Lares does the reading, decides what applies to *this* machine, applies what is
-safe, and keeps a record of every change so any of it can be put back.
+Lares does the reading, decides what applies to *this* machine, applies what it
+can undo, and keeps a record of every change so any of it can be put back.
+
+## Install
+
+**One file. No Python, no pip, no compiler.**
+
+Download it, run it. The executables are self-contained and the large one has the
+language model inside it, so it works on a machine that has never been online.
+
+| Download | What it is | Size |
+|---|---|---|
+| **`lares-full-x64.exe`** | Terminal application **with the model embedded**. Nothing to fetch, ever. | ~1.1 GB |
+| `lares-x64.exe` | Terminal application. Fetches a model the first time it wants one. | ~45 MB |
+| `lares-desktop-x64.exe` | Desktop application. | ~90 MB |
+| `lares-arm64.exe` · `lares-desktop-arm64.exe` | Windows on ARM. See [below](#will-it-run-on-my-machine). | ~45 / 90 MB |
+
+Get them from the [latest release](https://github.com/at0m-b0mb/Lares-Windows/releases/latest).
+Every file is listed in `SHA256SUMS.txt`; check yours before running it.
+
+Or let the installer pick the right one, verify it, and put it on your PATH:
+
+```powershell
+irm https://raw.githubusercontent.com/at0m-b0mb/Lares-Windows/main/install.ps1 | iex
+```
+
+That is a script from the internet piped into a shell, which is a thing you
+should be suspicious of — a security tool asking you to do it without comment
+would be a poor advertisement for itself. Read it first:
+
+```powershell
+irm https://raw.githubusercontent.com/at0m-b0mb/Lares-Windows/main/install.ps1 -OutFile install.ps1
+notepad install.ps1
+.\install.ps1 -Full -Desktop -StartWithWindows
+```
+
+<details>
+<summary>From source instead</summary>
+
+```bash
+git clone https://github.com/at0m-b0mb/Lares-Windows
+cd Lares-Windows
+pip install -r requirements-gui.txt      # or requirements.txt for terminal only
+python lares.py doctor
+```
+
+macOS and Linux run everything in demo mode against a synthetic machine, which is
+how the interface is developed and screenshotted.
+
+</details>
+
+**First run, in this order.** `doctor` says whether this machine can run it,
+`scan` changes nothing, `plan` shows you what it *would* do and why. Only then
+`run`.
+
+```powershell
+lares doctor
+lares scan
+lares plan
+lares run
+```
+
+Double-clicking `lares.exe` in Explorer opens a menu instead of flashing a usage
+message at you and closing.
 
 ## Two applications
 
 Same engine, two front doors. Neither needs the other.
 
-```bash
-python lares.py run              # one cycle: look, decide, fix, verify
-python lares.py watch            # the headless agent, on a schedule
-python lares-gui.py              # the desktop application
-```
-
 | | |
 |---|---|
-| **`lares.py`** | Terminal. Uses `rich` when it is installed and plain `print` when it is not, because a machine with a bare Python install is exactly the machine that most needs hardening. `watch` is the agent with no window. |
-| **`lares-gui.py`** | Desktop. Starts working the moment it opens and keeps working whether you look at it or not. |
+| **`lares.exe`** | Terminal. Uses colour when `rich` is available and plain text when it is not, because a machine with nothing installed is exactly the machine that most needs hardening. `lares watch` is the agent with no window. |
+| **`lares-desktop.exe`** | Desktop. Starts working the moment it opens and keeps working whether you look at it or not. |
 
 <div align="center">
 
@@ -58,249 +115,235 @@ python lares-gui.py              # the desktop application
 
 ## How it decides
 
-The model is not allowed to write the code that runs on your machine. It
-**chooses** from a catalogue of thirty controls, each one written and reviewed by
-hand, each carrying a detection probe, a remediation, a rollback, and a plain
-statement of what it costs you.
+**The model chooses from a catalogue. It never writes the code that runs.**
+
+This is the whole design. Every remediation is a hand-written, reviewed entry in
+`lares/catalog/controls/*.yaml`, carrying a detection probe, a fix, a rollback,
+a risk tier, and a paragraph in plain English explaining why it matters. The
+model reads the scan and the retrieved catalogue pages and decides *which*
+controls to apply, in what order, with what parameters — and then everything it
+said is put through validation before anything runs.
 
 ```
-sense    run every control's probe          ->  facts + findings
-think    retrieve the relevant controls,
-         ask the model which to apply        ->  a plan
-act      for each, through the guard         ->  outcomes
-record   journal everything, including
-         the refusals                        ->  a history you can undo from
+sense    run every control's probe, gather machine context
+think    retrieve the relevant catalogue pages, ask the model to choose
+guard    validate parameters, screen the rendered script, check policy
+act      snapshot → apply → verify → health check → keep or undo
+record   journal the outcome, including refusals
+judge    update the circuit breaker
 ```
 
-That division is the whole design. The model contributes judgement — which fix
-matters most on a laptop that lives on public Wi-Fi, whether to bother with the
-audit policy before the firewall is on — and the catalogue contributes the part
-that has to be correct. A model that hallucinates can pick the wrong control. It
-cannot invent one.
-
-**Detection and verification are the same probe.** After a change, Lares re-runs
-the exact code that found the problem. There is no second implementation to
-drift out of step with the first.
+A 1.5B model on a slow CPU will sometimes be wrong. It cannot be wrong in a way
+that matters, because the worst it can do is name a control that exists and
+supply parameters that get rejected.
 
 ## Why you can leave it running
 
-You asked for no confirmation dialogs, so the safety cannot live in a prompt. It
-lives in the executor, and every single change goes through all of this:
+You asked for no confirmation dialogs. So the safety is not a prompt — it is that
+every change is measured, and undone on the spot if it did not work.
+
+- **Verified, not assumed.** After applying a fix, the same probe that found the
+  problem is run again. If the problem is still there, the change is reverted.
+- **Health-checked.** Name resolution, the default gateway, an enabled
+  administrator account, RDP and WinRM listeners are read before and after. If
+  something that was working stops working, the change goes back immediately.
+- **Snapshotted.** Registry keys, firewall rules and service configuration are
+  exported before the script that touches them runs.
+- **Journalled.** Every outcome is appended to a log that carries the fully
+  rendered rollback script, so a change can be undone months later without the
+  model, the catalogue, or the original finding.
+- **Rate-limited.** A budget per cycle, so one bad scan cannot rewrite a machine
+  in a single pass.
+- **Circuit-broken.** Two consecutive bad cycles and autonomy halts. It keeps
+  scanning and reporting, and waits for a person.
+
+A rollback that itself fails is recorded as a failure, not as a rollback — the
+change is still on the machine, it says so, and it stays in the undo list.
+
+## What it writes down
+
+Three records, kept apart because they answer three different questions.
 
 | | |
 |---|---|
-| **validate** | The model's parameters must match the shapes the control declared. Types, ranges, enum membership, regex — and a hard refusal of shell metacharacters no matter how permissive the control's own pattern is. |
-| **screen** | The rendered script is read for operations Lares will never perform: formatting a disk, deleting a directory tree, removing a user, deleting shadow copies, editing boot configuration, disabling antivirus, downloading and executing. |
-| **probe** | Is it already fixed? Then do nothing. |
-| **baseline** | Read seven health signals while the machine is still known good. |
-| **snapshot** | Export the registry keys, firewall rules and service configuration the script is about to touch. |
-| **apply** | Run it. |
-| **verify** | Re-run the probe. Did it actually work? |
-| **health** | Re-read the signals. Did anything that worked stop working? |
-| **decide** | Keep it, or **put it back, right now**. |
+| **Journal** | What was *changed*, and how to undo it. The legal record; never mixed with diagnostics. |
+| **Activity log** | What *happened*, in order. Cycles, probes, the breaker. Plain text for reading, JSON lines for machines. |
+| **Transcript** | What was *said to the model, what it said back, and what was then done with it*. |
 
-A change survives only if the problem is gone *and* nothing regressed. Anything
-else is rolled back on the spot, with no human involved — there is nobody to
-ask at three in the morning.
+That third one is the one worth having. Anyone can log a prompt and a completion.
+In a tool that acts on the answer, what matters is whether the answer was used —
+so each exchange records which of the model's choices the guard accepted and
+which it refused, and why. An entry showing six proposed actions and five
+refusals is the most informative thing this application produces.
 
-Above that sit three more limits:
+Every failure also gets its own report file with the full traceback and a
+description of the machine at the time, keyed by a short id that is shown in the
+interface. `failed (LR-4F2A91)` is something you can look up.
 
-- **A change budget per cycle**, so one bad scan cannot rewrite the machine in a
-  single pass. A backlog drains over several cycles with a verification between
-  each.
-- **Two rollbacks inside one cycle stops that cycle.** If two changes had to be
-  undone, this machine does not behave the way the catalogue expects, and
-  working through the remaining eight actions to find that out is not wisdom.
-- **A circuit breaker.** After consecutive bad cycles, Lares stops changing
-  anything and keeps reporting until a person types `lares reset`.
+```powershell
+lares logs                        # the running account
+lares errors --show LR-4F2A91     # one failure, in full
+lares transcript -v               # prompts, replies, and what survived
+lares journal                     # what was actually changed
+lares undo --last 1               # put it back
+```
 
-Health signals are compared against a **baseline**, not against an absolute. A
-laptop that was already offline before the change is not a regression Lares
-caused, and reporting it as one would make every cycle on a disconnected machine
-look like a catastrophe.
+In the desktop application this is the **Chronicle** page.
+
+<div align="center">
+
+![The Chronicle page](assets/screenshots/04-chronicle-dark.png)
+
+</div>
 
 ## The model
 
-Embedded, quantised, on the CPU, with no network involved. A security tool that
-uploads your machine's configuration to somebody else's computer in order to
-decide what to do about it is not a security tool.
+**Qwen2.5-Coder**, GGUF at Q4\_K\_M, on the CPU via llama.cpp. No API key, no
+network, no telemetry — the model is a file on disk and inference happens in the
+process. A security tool that ships a machine's configuration to somebody else's
+server to decide what to do about it is not a security tool.
 
-The tier is chosen from measured RAM and physical core count:
+The job is not recalling security trivia; the facts come from the catalogue
+through retrieval, which is far more reliable than anything a small model
+remembers. The job is reading a scan, choosing controls, filling in parameters,
+and emitting strictly-shaped JSON without drifting. That is a code-shaped task,
+and Qwen2.5-Coder is the strongest open family at this size.
 
-| | Model | Size | Needs | Roughly |
-|---|---|---|---|---|
-| `7b` | Qwen2.5-Coder 7B Instruct | 4.7 GB | 16 GB RAM, 6 cores | 3-6 tok/s |
-| `3b` | Qwen2.5-Coder 3B Instruct | 2.0 GB | 8 GB RAM, 4 cores | 6-12 tok/s |
-| `1.5b` | Qwen2.5-Coder 1.5B Instruct | 1.1 GB | 4 GB RAM, 2 cores | 10-20 tok/s |
-| `0.5b` | Qwen2.5-Coder 0.5B Instruct | 0.4 GB | anything | 20-40 tok/s |
+| Tier | Size | Needs | Speed on a 4-core CPU |
+|---|---|---|---|
+| 7B | 4.7 GB | 16 GB RAM | 3–6 tokens/s |
+| **3B** | 2.0 GB | 8 GB RAM | 6–12 tokens/s — the default |
+| 1.5B | 1.1 GB | 4 GB RAM | 10–20 tokens/s — embedded in `lares-full-x64.exe` |
+| 0.5B | 0.4 GB | 2 GB RAM | 20–40 tokens/s |
 
-All Q4_K_M GGUF through `llama.cpp`. `python lares.py model` measures your
-machine and tells you which it picked and why.
+The tier is chosen from measured RAM and physical cores. In the single-file
+build, the model is appended to the executable behind a 64-byte footer and
+unpacked once into `%LOCALAPPDATA%\Lares\models` with its SHA-256 verified —
+so the file is genuinely self-contained but does not re-extract a gigabyte on
+every launch.
 
-**Qwen2.5-Coder rather than a security-tuned model**, because the job is not
-recalling security trivia — it is reading a scan, choosing controls, filling in
-parameters and emitting strict JSON without drifting. That is a code-shaped task,
-and Qwen2.5-Coder is the strongest open family at these sizes. The security facts
-come from BM25 retrieval over the catalogue's own rationales, which is far more
-reliable than anything a 3B model remembers.
+**There is always a planner.** If no model is installed, is too big for the
+machine, or fails to load, the deterministic built-in planner runs instead: it
+sorts by severity, prefers the cheapest reversible fix, respects dependencies,
+and stops at the budget. The machine still gets hardened. It just does not get
+explained as well.
 
-**The model is optional.** If it is missing, too large for the machine, or
-inference fails, the built-in planner takes over: sort by severity, prefer the
-cheapest reversible fix, respect dependencies, stop at the budget. It is not a
-stub. An install that never downloads a model still hardens the machine
-correctly; it just cannot explain itself in your own terms.
+`training/` builds an instruction set from the catalogue and fine-tunes a LoRA
+on it, with an evaluation harness that scores a model on whether its plans are
+parseable, real, accepted by the guard, faithful to the probe, and complete.
 
-And the model's plan is a **prioritisation, not a veto**. A finding it neither
-planned nor explicitly deferred gets appended by the built-in planner, because a
-1.5B model that stops generating mid-list is having a generation artefact, not
-making a decision, and a security tool must not lose a critical fix to one.
+## Will it run on my machine?
 
-Training your own adapter is documented honestly in
-[`training/README.md`](training/README.md), including the part where the right
-answer might be not to.
+Ask it: `lares doctor` reports what is present, what is missing, and what to do
+about each.
+
+| | x64 | ARM64 *(incl. VMware Fusion on Apple Silicon)* |
+|---|---|---|
+| Scanner, catalogue, executor, rollback | yes | yes |
+| Terminal application | yes | yes |
+| Desktop application | yes | yes — PyQt6 ships ARM64 wheels |
+| Embedded language model | yes | **no** |
+| Built-in planner | yes | yes |
+
+On **Windows 11 ARM64** everything runs natively except the model backend:
+`llama-cpp-python` publishes no ARM64 wheel, so it needs a compiler or it is
+simply left out. The built-in planner is the product there, and the application
+says so rather than pretending. If you want the model too, install Visual Studio
+Build Tools with the ARM64 C++ workload and `pip install llama-cpp-python`.
+
+Windows on ARM will also happily run x64 Python under emulation, which works and
+is slower; `doctor` detects that case with `IsWow64Process2` and reports it
+separately rather than mistaking it for a real x64 machine.
+
+**In a VM, take a snapshot before the first run with changes enabled.** It is the
+cheapest possible undo and covers the cases the rollback journal cannot, such as
+a change that needs a restart to reveal its effect.
 
 ## What it will not do
 
-This is the half that matters.
-
-**It will never tell you the machine is secure.** The best verdict it gives is
-"nothing outstanding", which means the thirty things it checks are in the state
-it wanted. There are settings it does not look at, software it cannot see inside,
-and whole categories of attack no configuration check would catch.
-
-**Seven controls it finds but deliberately will not fix**, because the
-consequences are not measurable by a health check:
-
-| | Why a person decides |
-|---|---|
-| Disk not encrypted | Needs a recovery key stored somewhere safe, may need firmware changes, and loses the machine if the key is lost. |
-| Tamper Protection off | Cannot be enabled by a script *by design* — if a program could switch it on, a program could switch it off. It is a switch in the Windows Security app. |
-| Too many local administrators | Which administrator is surplus is a judgement about how the machine is used. Getting it wrong locks someone out of their own computer. |
-| Service binary in a writable folder | Tightening the folder may break the application, which sometimes legitimately writes there. |
-| Privileged scheduled task from a writable path | Either a badly packaged application or somebody's foothold, and Lares cannot tell which. |
-| Security updates 45+ days behind | Reboots the machine, occasionally breaks a driver. An unattended loop does not get to decide when your machine restarts. |
-| Clear-text password in the registry | Removing automatic logon can lock the owner out of a kiosk or media box nobody has typed the password into for two years. |
-
-Each is reported with the catalogue's own reasoning, in the terminal under
-**Needs a person** and in the desktop application under **Findings**.
+- Run any script the model wrote. The Expert lane (`lares ask`) has the model
+  author PowerShell freely, runs it past a static screen, prints it, and stops.
+  Executing it is your decision and your keystroke.
+- Apply anything in the **intrusive** tier without a person. Renaming the
+  built-in Administrator, disabling RDP, starting BitLocker — a health check
+  cannot tell the difference between "the remote operator is fine" and "the
+  remote operator is locked out and cannot tell us".
+- Format a volume, clear a disk, delete shadow copies, edit the boot
+  configuration, disable a network adapter, turn off Defender, delete a user,
+  reboot, or pipe a download into `Invoke-Expression`. These are refused in the
+  catalogue and in the Expert lane, by pattern, before anything runs.
+- Delete a stored credential and claim it can put it back. `IDN-004` clears a
+  clear-text autologon password and is marked irreversible, because keeping a
+  copy of a password in order to restore it is not something this will do.
+- Tell you your machine is secure. The best verdict is *nothing outstanding*,
+  which means thirty specific checks passed.
 
 ## Status, stated plainly
 
 **v0.1.0. The engine is tested; the PowerShell is not.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the theme — is covered by 251 assertions that run on Windows and Linux in
-CI. That part works.
+loader, the logging, the theme — is covered by **329 tests** that run on Windows
+and Linux across Python 3.10 and 3.12 in CI. That part works.
 
-What has **not** happened is any of the thirty controls being executed against a
-live Windows machine. Every probe and remediation in the catalogue was written
-against Microsoft's documentation and reviewed by hand, and every one of them is
-exercised in demo mode, which fakes the PowerShell round trip. So the shapes are
-right and the logic around them is right, but a cmdlet that behaves differently
-on Windows 11 24H2 than the documentation says would not have been caught yet.
+What has **not** happened is any of the thirty controls executing against a live
+Windows machine. Every probe and remediation was written against Microsoft's
+documentation and reviewed by hand, and every one is exercised in demo mode,
+which fakes the PowerShell round trip. The shapes are right and the logic around
+them is right, but a cmdlet that behaves differently on Windows 11 24H2 than the
+documentation says would not have been caught yet.
 
-Treat this release as ready to be tried on a machine you can afford to restore.
-Start with `--dry-run` and read the plan before you let it act:
-
-```bash
-python lares.py run --dry-run --report first-look.html
-```
-
-Findings from real hardware are the most useful thing anyone could contribute.
-
-## Installing
-
-Windows is the target. macOS and Linux run everything in demo mode against a
-synthetic machine, which is how it is developed and screenshotted.
-
-```bash
-git clone https://github.com/at0m-b0mb/Lares-Windows
-cd Lares-Windows
-pip install -r requirements.txt          # PyYAML, and rich if you want colour
-pip install -r requirements-gui.txt      # PyQt6, for the desktop application
-pip install llama-cpp-python             # for the model; optional
-
-python lares.py --demo scan              # try it against the synthetic machine
-python lares.py model --download         # fetch the model for your hardware
-python lares.py run                      # the real thing
-```
-
-Remediation needs an elevated process. Lares says so plainly rather than failing
-every fix with an access-denied, and a non-elevated run is a perfectly good
-read-only mode.
-
-### Commands
-
-| | |
-|---|---|
-| `scan` | Look and report. Changes nothing. `--report out.html` |
-| `plan` | Show what it would do and why, without doing it. |
-| `run` | One cycle. `--dry-run` to decide everything and change nothing. |
-| `watch` | Cycles on a schedule until stopped. |
-| `journal` | Every change, newest first. |
-| `undo` | Put a change back. `--last 3`, or an action id. |
-| `controls` | Browse the catalogue. `--show NET-003` for one in full. |
-| `model` | Which model, why that one, and `--download`. |
-| `ask` | The Expert lane — the model writes a script, screened and printed, never run. |
-| `reset` | Re-arm autonomy after the breaker halted it. |
-| `config` | `--set ceiling=safe --set budget=5` |
+Treat this release as ready to try on a machine you can afford to restore. Start
+with `lares scan`, read `lares plan`, and use `--dry-run` if you want the whole
+cycle with nothing changed. Findings from real hardware are the most useful thing
+anyone could contribute.
 
 ## The catalogue
 
-Thirty controls across five domains. Twenty-three can run unattended; the rest
-need a person, and say so.
+Thirty controls across five domains, each with a probe, a fix, a rollback and a
+paragraph of prose. `lares controls` browses them; `lares controls --show NET-003`
+prints one in full.
 
-| Domain | What it covers |
+| Domain | Covers |
 |---|---|
-| `network` | Firewall profiles and default actions, listeners on every interface, SMBv1, LLMNR poisoning, Remote Registry |
-| `identity` | UAC, silent elevation, Guest, stored credentials, WDigest, LSA protection, anonymous enumeration |
-| `defence` | Defender real-time protection and signatures, Tamper Protection, the LSASS credential-theft ASR rule, SmartScreen, firewall logging, BitLocker |
-| `services` | Unquoted service paths, writable service directories, Point and Print driver installation, privileged scheduled tasks |
-| `system` | The PowerShell 2.0 engine, script block logging, command-line auditing, AutoRun, patch currency |
+| `network` | Firewall profiles and default actions, exposed listeners, SMBv1, LLMNR, Remote Registry |
+| `identity` | UAC, Guest, clear-text autologon passwords, WDigest, LSA protection, anonymous enumeration |
+| `defence` | Defender real-time protection and signatures, tamper protection, ASR rules, SmartScreen, BitLocker, firewall logging |
+| `services` | Unquoted service paths, service binaries in writable directories, Print Spooler, WinRM |
+| `system` | PowerShell v2, script-block logging, command-line auditing, AutoRun, Windows Update |
 
-Adding one is a YAML file. The loader refuses a catalogue that is not fit to
-execute from: a remediation with no rollback, an undeclared placeholder, an
-unconstrained string parameter, a `choices: [Off, Warn]` that YAML quietly turned
-into a boolean, an unrecognised key that would have silently dropped a safety
-property.
-
-<div align="center">
-
-![The Catalogue page](assets/screenshots/04-catalogue-light.png)
-
-</div>
+The catalogue is the trust boundary, so it is validated hard at load: every
+control needs a detect probe; anything with a remediation needs a rollback unless
+it declares why not; every `{placeholder}` must be a declared parameter and every
+declared parameter must be used; string and path parameters must declare a regex,
+because an unconstrained one is a command-injection slot; and an unrecognised key
+is a loud failure rather than a silently dropped safety property.
 
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 251 assertions
+python -m pytest tests/ -q
 ```
 
-The two that earn their keep:
-
-**The guard** is tested against inputs a model would never produce but an
-attacker would — injection payloads in every parameter slot, type confusion,
-values just outside their declared range — plus the awkward cases that are
-legitimate and must still pass, like `C:\Program Files (x86)\`.
-
-**The theme** checks every text pairing against WCAG AA in both themes. That is
-not ceremony: it caught four real failures, including a brass unreadable on its
-own background and a blue-grey that had drifted into a palette specified as
-warm.
+329 tests, none of which need Windows. They cover the guard against injection
+payloads in every parameter slot, the executor's full state machine including
+rollbacks that themselves fail, the planner against the shapes a quantised model
+actually produces, state files that survive being interrupted, the model overlay
+including corrupted and truncated payloads, and every text pairing in both themes
+against WCAG AA.
 
 ## Development notes
 
-Three bugs worth recording, because each was found by running the thing rather
-than by reading it:
+```bash
+python tools/capture.py          # render every page in both themes
+python tools/make_banner.py      # regenerate the banner
+python training/build_dataset.py # build the instruction set from the catalogue
+python training/evaluate.py      # score a model's planning against the judge
+```
 
-- `render()` used `str.format`, which parses PowerShell's own `{ }` script blocks
-  as replacement fields. Every rollback with an `if` in it failed to render.
-- `Severity` subclasses `str` so it serialises cleanly, which means it inherits
-  `str`'s comparison operators. Overriding only `__lt__` left `>` falling through
-  to alphabetical comparison, where `"high" < "medium"`. Every report understated
-  the worst finding on the machine.
-- A font declared in a Qt stylesheet beats `setFont()`, which had silently
-  flattened every serif heading in the desktop application back to the body face.
+The Windows executables are built by CI on `windows-latest` and `windows-11-arm`,
+because PyInstaller is a bundler rather than a cross-compiler — a Windows binary
+has to be produced on Windows, and an ARM64 one on ARM64.
 
 ## Licence
 
@@ -309,12 +352,6 @@ MIT. See [LICENSE](LICENSE).
 ---
 
 <div align="center">
-<sub>
-
-Built by [at0m-b0mb](https://github.com/at0m-b0mb).
-Headings in Georgia, interface in Segoe UI, evidence in Consolas.
-The accent is a deep brass, dark enough to be read as small text on paper;
-a second, brighter gold marks the things that carry no words.
-
-</sub>
+<sub>Set in Spectral and Inter. The gold is a deep brass that stays readable as
+small text, not a bright fill. Dark mode is true black.</sub>
 </div>
