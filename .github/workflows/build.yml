@@ -105,14 +105,19 @@ jobs:
         run: |
           $url = "https://huggingface.co/$env:MODEL_REPO/resolve/main/$env:MODEL_FILE"
           Write-Host "Downloading $url"
-          curl.exe -L --fail --retry 3 -o model.gguf $url
-          "{0:N0} MB" -f ((Get-Item model.gguf).Length / 1MB)
+          # Keep the upstream filename. It is recorded in the executable's
+          # footer and becomes the name of the unpacked file, and it is what
+          # lets the application match the payload to its ladder entry - so
+          # "model.gguf" would cost the real name, context length and speed
+          # estimate on the Model page.
+          curl.exe -L --fail --retry 3 -o $env:MODEL_FILE $url
+          "{0:N0} MB" -f ((Get-Item $env:MODEL_FILE).Length / 1MB)
 
       - name: Embed it
         if: github.event_name == 'push' || inputs.embed_model
         shell: pwsh
         run: |
-          python winbuild/embed_model.py dist/lares.exe model.gguf --output dist/lares-full-x64.exe
+          python winbuild/embed_model.py dist/lares.exe $env:MODEL_FILE --output dist/lares-full-x64.exe
           python winbuild/embed_model.py --check dist/lares-full-x64.exe
 
       - name: Prove the single file actually works
@@ -196,3 +201,4 @@ jobs:
             release/SHA256SUMS.txt
           fail_on_unmatched_files: true
           generate_release_notes: false
+          body_path: .github/RELEASE_NOTES.md
