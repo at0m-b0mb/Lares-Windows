@@ -353,9 +353,30 @@ class Planner:
         the model's guess over a measurement would be strange. So a discovered
         value wins, and the model's parameters only fill gaps or pick between
         several findings for the same control.
+
+        Keys the control does not declare are dropped here rather than passed
+        on. The guard refuses an action carrying an undeclared parameter, and
+        it is right to - but a small model that helpfully adds
+        ``"reason": "rdp exposed"`` beside two perfectly good discovered values
+        would otherwise block a fix the scan had already worked out in full.
+        Dropping noise the catalogue never asked for is not the same as
+        loosening the guard, which still sees and rejects anything unexpected.
         """
         findings = by_control.get(control_id, [])
         model_params = dict(supplied) if isinstance(supplied, dict) else {}
+
+        control = self.catalog.get(control_id)
+        if control is not None and model_params:
+            declared = {spec.name for spec in control.params}
+            undeclared = sorted(set(model_params) - declared)
+            if undeclared:
+                for key in undeclared:
+                    model_params.pop(key, None)
+                self.notes.append(PlanNote(
+                    "info",
+                    f"The model added {undeclared} to {control_id}, which the "
+                    "control does not take. Dropped; the scan's own values were used.",
+                ))
 
         if not findings:
             return model_params
