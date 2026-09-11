@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from lares.brain.plan import Planner, builtin_plan
 from lares.catalog import loader
-from lares.core import Finding, RiskTier, Scan, Severity
+from lares.core import Finding, RiskTier, Scan
 
 
 CATALOG = loader.load()
