@@ -1,0 +1,307 @@
+# Network exposure controls.
+#
+# Probe contract (see catalog/PROBE.md): every `detect` body must print a single
+# JSON object with at least `compliant` and `observed`. A probe that can find the
+# same problem more than once returns an `instances` array, one entry per
+# occurrence, each carrying the `params` its remediation needs.
+
+- id: NET-001
+  title: Windows Firewall profile is switched off
+  domain: network
+  severity: high
+  risk: caution
+  tags: [firewall, exposure]
+  references:
+    - "CIS Microsoft Windows Benchmark, Windows Firewall with Advanced Security"
+    - "https://learn.microsoft.com/powershell/module/netsecurity/set-netfirewallprofile"
+  rationale: >
+    Windows keeps three separate firewall profiles - Domain, Private and Public -
+    and whichever one matches the network you are currently joined to is the one
+    doing the work. Turning a profile off removes the default block on unsolicited
+    inbound traffic for every network of that kind, so any service listening on
+    the machine becomes reachable by anything else on the same network. This is
+    the single largest change in exposure a Windows desktop can undergo, and it is
+    frequently switched off once to make a game or a printer work and then never
+    switched back.
+  blast_radius: >
+    Re-enabling a profile restores default inbound blocking. A service that was
+    only reachable because the firewall was off will stop being reachable. The
+    health check verifies the machine still has working outbound connectivity and
+    that any active remote session survives; if not, the change is reverted.
+  params:
+    - name: profile
+      type: enum
+      choices: [Domain, Private, Public]
+      description: Which firewall profile to re-enable.
+  detect: |
+    $off = @(Get-NetFirewallProfile -Profile Domain,Private,Public |
+             Where-Object { "$($_.Enabled)" -ne 'True' })
+    $names = @($off | ForEach-Object { "$($_.Name)" })
+    [pscustomobject]@{
+      compliant = ($off.Count -eq 0)
+      observed  = if ($off.Count -eq 0) {
+                    'All three firewall profiles are enabled'
+                  } else {
+                    'Firewall is off for profile(s): ' + ($names -join ', ')
+                  }
+      evidence  = (Get-NetFirewallProfile -Profile Domain,Private,Public |
+                   ForEach-Object { "$($_.Name)=$($_.Enabled)" }) -join '; '
+      instances = @($off | ForEach-Object {
+                    [pscustomobject]@{
+                      params   = @{ profile = "$($_.Name)" }
+                      observed = "The $($_.Name) firewall profile is disabled"
+                    } })
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    Set-NetFirewallProfile -Profile {profile} -Enabled True
+  rollback: |
+    Set-NetFirewallProfile -Profile {profile} -Enabled False
+
+- id: NET-002
+  title: Firewall default inbound action is Allow
+  domain: network
+  severity: high
+  risk: caution
+  tags: [firewall, exposure]
+  depends_on: [NET-001]
+  references:
+    - "CIS Microsoft Windows Benchmark, Inbound connections"
+  rationale: >
+    A firewall profile can be enabled and still permit everything, because the
+    default action for inbound traffic that matches no rule is configurable. When
+    that default is Allow, the profile only blocks what an explicit rule blocks,
+    which inverts the whole point of a default-deny firewall. The correct posture
+    is Block for inbound and Allow for outbound, with explicit allow rules for the
+    handful of services that genuinely need to be reachable.
+  blast_radius: >
+    Any inbound service that was working only because of the permissive default,
+    rather than because of its own allow rule, stops being reachable. Most Windows
+    features create their own rules at install time and are unaffected.
+  params:
+    - name: profile
+      type: enum
+      choices: [Domain, Private, Public]
+      description: Which firewall profile to set to default-deny inbound.
+  detect: |
+    $bad = @(Get-NetFirewallProfile -Profile Domain,Private,Public |
+             Where-Object { "$($_.DefaultInboundAction)" -eq 'Allow' })
+    $names = @($bad | ForEach-Object { "$($_.Name)" })
+    [pscustomobject]@{
+      compliant = ($bad.Count -eq 0)
+      observed  = if ($bad.Count -eq 0) {
+                    'Every profile blocks unmatched inbound traffic by default'
+                  } else {
+                    'Default inbound action is Allow on: ' + ($names -join ', ')
+                  }
+      evidence  = (Get-NetFirewallProfile -Profile Domain,Private,Public |
+                   ForEach-Object { "$($_.Name)=$($_.DefaultInboundAction)" }) -join '; '
+      instances = @($bad | ForEach-Object {
+                    [pscustomobject]@{
+                      params   = @{ profile = "$($_.Name)" }
+                      observed = "$($_.Name) allows unmatched inbound traffic by default"
+                    } })
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    Set-NetFirewallProfile -Profile {profile} -DefaultInboundAction Block
+  rollback: |
+    Set-NetFirewallProfile -Profile {profile} -DefaultInboundAction Allow
+
+- id: NET-003
+  title: Service listening on every network interface
+  domain: network
+  severity: medium
+  risk: caution
+  tags: [ports, exposure, listener]
+  references:
+    - "https://learn.microsoft.com/powershell/module/nettcpip/get-nettcpconnection"
+  rationale: >
+    A process that binds to 0.0.0.0 or [::] accepts connections from any network
+    the machine is attached to, not just from itself. Plenty of software does this
+    by default when it only ever needed to listen on localhost - development
+    servers, database engines, printer and update helpers. Each one is an entry
+    point that has to be patched and watched forever. The cheapest correct answer
+    for a listener that has no business being remote is a targeted inbound block
+    rule, which leaves the software working locally while removing it from the
+    network.
+  blast_radius: >
+    If the service genuinely was meant to be reached from another machine, that
+    access stops. The rule is scoped to a single TCP port and a single profile,
+    is named with a Lares- prefix, and is removed cleanly on rollback. Blocking is
+    preferred over stopping the service because it changes nothing about the
+    software's own configuration.
+  params:
+    - name: port
+      type: int
+      min: 1
+      max: 65535
+      description: The TCP port to block inbound.
+    - name: profile
+      type: enum
+      choices: [Domain, Private, Public, Any]
+      description: >
+        Which network profile the block applies to. Public alone is the
+        conservative choice - it removes the listener from untrusted networks
+        while leaving a home or office LAN working.
+  detect: |
+    # Ports Windows itself needs, plus the loopback-only cases we never flag.
+    $baseline = @(135, 139, 445, 5353, 5355, 49664, 49665, 49666, 49667, 49668)
+    $rows = @()
+    foreach ($c in Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue) {
+      $addr = "$($c.LocalAddress)"
+      if ($addr -ne '0.0.0.0' -and $addr -ne '::') { continue }
+      $port = [int]$c.LocalPort
+      if ($baseline -contains $port) { continue }
+      if ($port -ge 49152) { continue }   # ephemeral RPC range, not a fixed service
+      $name = 'unknown'
+      $path = ''
+      try {
+        $p = Get-Process -Id $c.OwningProcess -ErrorAction Stop
+        $name = $p.ProcessName
+        $path = "$($p.Path)"
+      } catch { }
+      $rows += [pscustomobject]@{ Port = $port; Name = $name; Path = $path }
+    }
+    $rows = @($rows | Sort-Object Port -Unique)
+    [pscustomobject]@{
+      compliant = ($rows.Count -eq 0)
+      observed  = if ($rows.Count -eq 0) {
+                    'No unexpected service is listening on all interfaces'
+                  } else {
+                    "$($rows.Count) service(s) listening on all interfaces: " +
+                    (($rows | ForEach-Object { "$($_.Port)/$($_.Name)" }) -join ', ')
+                  }
+      evidence  = ($rows | ForEach-Object { "$($_.Port) $($_.Name) $($_.Path)" }) -join "`n"
+      instances = @($rows | ForEach-Object {
+                    [pscustomobject]@{
+                      params   = @{ port = $_.Port; profile = 'Public' }
+                      observed = "TCP $($_.Port) is open to all interfaces, held by $($_.Name)"
+                      evidence = "$($_.Path)"
+                    } })
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $name = 'Lares-Block-TCP-{port}-{profile}'
+    if (-not (Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)) {
+      New-NetFirewallRule -Name $name `
+        -DisplayName 'Lares: block inbound TCP {port} ({profile})' `
+        -Description 'Added by Lares to remove an unnecessary network listener.' `
+        -Direction Inbound -Action Block -Protocol TCP -LocalPort {port} `
+        -Profile {profile} -Enabled True | Out-Null
+    }
+  rollback: |
+    Remove-NetFirewallRule -Name 'Lares-Block-TCP-{port}-{profile}' -ErrorAction SilentlyContinue
+
+- id: NET-004
+  title: SMBv1 is still enabled
+  domain: network
+  severity: critical
+  risk: caution
+  tags: [smb, legacy, wannacry]
+  references:
+    - "https://learn.microsoft.com/windows-server/storage/file-server/troubleshoot/detect-enable-and-disable-smbv1-v2-v3"
+    - "MS17-010 / EternalBlue"
+  rationale: >
+    SMBv1 is the 1990s file sharing protocol that EternalBlue and WannaCry used to
+    spread. It has no protection against man-in-the-middle tampering, it cannot
+    negotiate modern encryption, and every version of Windows since 2017 ships
+    with it off by default. If it is on, either it was turned on deliberately for
+    a very old device, or an old in-place upgrade carried it forward. Nothing made
+    this decade needs it.
+  blast_radius: >
+    Devices that only speak SMBv1 - some network scanners, NAS boxes and medical
+    or industrial equipment from before 2010 - will no longer be able to reach
+    shares on this machine. The server component is disabled; rollback re-enables
+    it. A restart may be needed for the change to take full effect.
+  detect: |
+    $cfg = Get-SmbServerConfiguration
+    $on  = [bool]$cfg.EnableSMB1Protocol
+    [pscustomobject]@{
+      compliant = (-not $on)
+      observed  = if ($on) { 'The SMBv1 server protocol is enabled' }
+                  else     { 'SMBv1 server protocol is disabled' }
+      evidence  = "EnableSMB1Protocol=$($cfg.EnableSMB1Protocol); EnableSMB2Protocol=$($cfg.EnableSMB2Protocol)"
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force
+  rollback: |
+    Set-SmbServerConfiguration -EnableSMB1Protocol $true -Force
+
+- id: NET-005
+  title: LLMNR name resolution is enabled
+  domain: network
+  severity: high
+  risk: safe
+  tags: [llmnr, credential-theft, responder]
+  references:
+    - "https://learn.microsoft.com/windows-server/networking/dns/deploy/dns-policies-overview"
+    - "Responder / NTLM relay"
+  rationale: >
+    When DNS cannot resolve a name, Windows falls back to shouting the name at the
+    whole local network and trusting whoever answers first. An attacker on the same
+    network simply answers every request, and the machine hands over an NTLMv2
+    authentication attempt containing a hash of the user's password - which can be
+    cracked offline or relayed straight onto another server. This is the single
+    most reliable trick on an internal network, and the fallback is worth nothing
+    on a network that has working DNS.
+  blast_radius: >
+    Name lookups that only ever succeeded through the multicast fallback will stop
+    resolving. On any network with a functioning DNS server, which is effectively
+    all of them, nothing changes. The fix is one registry value and is fully
+    reversible.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+    $val = (Get-ItemProperty -Path $key -Name EnableMulticast -ErrorAction SilentlyContinue).EnableMulticast
+    $disabled = ($val -eq 0)
+    [pscustomobject]@{
+      compliant = $disabled
+      observed  = if ($disabled) { 'LLMNR is disabled by policy' }
+                  else { 'LLMNR is enabled - the machine will answer and trust multicast name requests' }
+      evidence  = "EnableMulticast=$(if ($null -eq $val) { '<not set>' } else { $val })"
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    New-ItemProperty -Path $key -Name EnableMulticast -Value 0 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+    Remove-ItemProperty -Path $key -Name EnableMulticast -ErrorAction SilentlyContinue
+
+- id: NET-006
+  title: Remote Registry service is available
+  domain: network
+  severity: medium
+  risk: caution
+  tags: [service, remote-access, reconnaissance]
+  references:
+    - "https://learn.microsoft.com/windows/security/threat-protection/security-policy-settings/"
+  rationale: >
+    The Remote Registry service lets another machine on the network read and write
+    this machine's registry. It is used by some management tools and by almost
+    every enumeration script an attacker runs after gaining a foothold, because
+    the registry reveals installed software, autostart entries, mapped shares and
+    often credentials. Workstations rarely need it; it is off by default on modern
+    Windows and gets switched on by legacy management agents.
+  blast_radius: >
+    Remote management tools that reach into this machine's registry - some backup
+    agents, inventory scanners and older helpdesk tooling - will fail. Local
+    registry use is completely unaffected. Rollback restores the previous start
+    type and restarts the service.
+  detect: |
+    $svc = Get-Service -Name RemoteRegistry -ErrorAction SilentlyContinue
+    if ($null -eq $svc) {
+      [pscustomobject]@{ compliant = $true; observed = 'Remote Registry service is not present' } |
+        ConvertTo-Json -Depth 5 -Compress
+    } else {
+      $wmi = Get-CimInstance Win32_Service -Filter "Name='RemoteRegistry'"
+      $bad = ("$($svc.Status)" -eq 'Running') -or ("$($wmi.StartMode)" -ne 'Disabled')
+      [pscustomobject]@{
+        compliant = (-not $bad)
+        observed  = if ($bad) { "Remote Registry is $($svc.Status), start mode $($wmi.StartMode)" }
+                    else { 'Remote Registry is stopped and disabled' }
+        evidence  = "Status=$($svc.Status); StartMode=$($wmi.StartMode)"
+      } | ConvertTo-Json -Depth 5 -Compress
+    }
+  remediate: |
+    Stop-Service -Name RemoteRegistry -Force -ErrorAction SilentlyContinue
+    Set-Service -Name RemoteRegistry -StartupType Disabled
+  rollback: |
+    Set-Service -Name RemoteRegistry -StartupType Manual

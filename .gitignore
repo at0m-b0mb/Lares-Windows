@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Local model weights. Fetched on first run with a pinned checksum; far too
+# large for the repository.
+models/
+*.gguf
+*.safetensors
+*.bin
+
+# Runtime state written by the agent itself.
+journal/
+snapshots/
+*.jsonl
+lares-report-*.html
+lares-report-*.json
+
+# Fine-tuning output.
+training/out/
+training/data/*.jsonl
+!training/data/.gitkeep
+
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+Thumbs.db

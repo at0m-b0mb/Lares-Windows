@@ -1,0 +1,273 @@
+# Microsoft Defender, SmartScreen, disk encryption and firewall telemetry.
+
+- id: DEF-001
+  title: Defender real-time protection is turned off
+  domain: defence
+  severity: critical
+  risk: safe
+  tags: [defender, antivirus]
+  references:
+    - "https://learn.microsoft.com/powershell/module/defender/set-mppreference"
+  rationale: >
+    Real-time protection is the part of Defender that inspects a file as it is
+    written or executed, which is the only part that stops something before it
+    runs. Scheduled scans find what is already on disk; they do not prevent the
+    first execution. When real-time protection is off the machine has no active
+    malware defence at all, and the most common reason it is off is that a piece
+    of software asked the user to disable it during install and never turned it
+    back on.
+  blast_radius: >
+    Re-enabling protection can cause Defender to quarantine something already
+    present on the machine. Software that was being ignored because scanning was
+    off may be flagged. This is the correct behaviour.
+  detect: |
+    $s = Get-MpComputerStatus
+    $p = Get-MpPreference
+    $on = [bool]$s.RealTimeProtectionEnabled
+    [pscustomobject]@{
+      compliant = $on
+      observed  = if ($on) { 'Defender real-time protection is active' }
+                  else { 'Defender real-time protection is disabled - nothing is inspecting files as they run' }
+      evidence  = "RealTimeProtectionEnabled=$($s.RealTimeProtectionEnabled); DisableRealtimeMonitoring=$($p.DisableRealtimeMonitoring); AMServiceEnabled=$($s.AMServiceEnabled)"
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    Set-MpPreference -DisableRealtimeMonitoring $false
+  rollback: |
+    Set-MpPreference -DisableRealtimeMonitoring $true
+
+- id: DEF-002
+  title: Defender threat definitions are out of date
+  domain: defence
+  severity: high
+  risk: safe
+  tags: [defender, antivirus, signatures]
+  depends_on: [DEF-001]
+  references:
+    - "https://learn.microsoft.com/powershell/module/defender/update-mpsignature"
+  rationale: >
+    Defender's signature set is refreshed several times a day, and a machine whose
+    definitions are a week old is blind to everything discovered since. Stale
+    definitions usually mean the machine has been off the network, that the update
+    service has been disabled, or that something on the machine is deliberately
+    preventing updates - which is itself a common symptom of an infection.
+  blast_radius: >
+    Downloads a signature package over the network. Nothing is changed on disk
+    other than Defender's own definitions.
+  rollback_policy: additive
+  rollback_note: >
+    Refreshing definitions only replaces Defender's own signature set with a newer
+    one from Microsoft. There is no prior state worth restoring, and rolling back
+    to older definitions would be strictly worse.
+  detect: |
+    $s = Get-MpComputerStatus
+    $age = [int]$s.AntivirusSignatureAge
+    [pscustomobject]@{
+      compliant = ($age -le 3)
+      observed  = "Defender definitions are $age day(s) old"
+      evidence  = "AntivirusSignatureVersion=$($s.AntivirusSignatureVersion); AntivirusSignatureLastUpdated=$($s.AntivirusSignatureLastUpdated)"
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    Update-MpSignature
+
+- id: DEF-003
+  title: Defender Tamper Protection is off
+  domain: defence
+  severity: high
+  risk: intrusive
+  tags: [defender, tamper-protection]
+  references:
+    - "https://learn.microsoft.com/defender-endpoint/prevent-changes-to-security-settings-with-tamper-protection"
+  rationale: >
+    Tamper Protection is what stops anything - including a script, an installer, or
+    this application - from switching Defender off through the registry or
+    PowerShell. With it on, a malicious program that gains administrator rights
+    still cannot disable your antivirus. With it off, disabling Defender is a
+    single command, which is exactly what ransomware does first.
+  blast_radius: >
+    Tamper Protection cannot be enabled from a script, and that is deliberate: if
+    a program could switch it on, a program could switch it off, which would
+    defeat the entire feature. It has to be turned on by a person in the Windows
+    Security app, under Virus and threat protection settings, or pushed by Intune.
+    Lares reports it and tells you where the switch is rather than pretending it
+    can flip it.
+  detect: |
+    $s = Get-MpComputerStatus
+    $on = [bool]$s.IsTamperProtected
+    [pscustomobject]@{
+      compliant = $on
+      observed  = if ($on) { 'Tamper Protection is on' }
+                  else { 'Tamper Protection is off - Defender can be disabled by any elevated process' }
+      evidence  = "IsTamperProtected=$($s.IsTamperProtected)"
+    } | ConvertTo-Json -Depth 5 -Compress
+
+- id: DEF-004
+  title: Credential theft from LSASS is not blocked
+  domain: defence
+  severity: high
+  risk: caution
+  tags: [defender, asr, lsass, credentials]
+  depends_on: [DEF-001]
+  references:
+    - "https://learn.microsoft.com/defender-endpoint/attack-surface-reduction-rules-reference"
+  rationale: >
+    Attack Surface Reduction is a set of targeted rules in Defender, each one
+    blocking a specific technique rather than a specific file. The rule identified
+    by 9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2 blocks programs from reading the memory
+    of LSASS, which is the step every credential dumper has to take. It costs
+    nothing on a normal machine and removes the single most valuable thing an
+    attacker can do after gaining local administrator rights.
+  blast_radius: >
+    Legitimate tools that read LSASS memory - some enterprise EDR agents, certain
+    backup and crash-diagnostic tools - will be blocked. Rollback removes the rule
+    entirely, returning Defender to its previous configuration.
+  detect: |
+    $ruleId = '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2'
+    $p = Get-MpPreference
+    $ids = @($p.AttackSurfaceReductionRules_Ids)
+    $acts = @($p.AttackSurfaceReductionRules_Actions)
+    $state = 'not configured'
+    for ($i = 0; $i -lt $ids.Count; $i++) {
+      if ("$($ids[$i])" -eq $ruleId) { $state = "$($acts[$i])" }
+    }
+    $ok = ($state -eq '1' -or $state -eq 'Enabled')
+    [pscustomobject]@{
+      compliant = $ok
+      observed  = if ($ok) { 'Defender blocks credential theft from LSASS' }
+                  else { "The LSASS credential-theft rule is $state" }
+      evidence  = "rule=$ruleId; state=$state; configured_rules=$($ids.Count)"
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    Add-MpPreference -AttackSurfaceReductionRules_Ids '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2' `
+                     -AttackSurfaceReductionRules_Actions Enabled
+  rollback: |
+    Remove-MpPreference -AttackSurfaceReductionRules_Ids '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2'
+
+- id: DEF-005
+  title: SmartScreen is not checking apps and downloads
+  domain: defence
+  severity: medium
+  risk: safe
+  tags: [smartscreen, phishing, downloads]
+  references:
+    - "https://learn.microsoft.com/windows/security/operating-system-security/virus-and-threat-protection/microsoft-defender-smartscreen/"
+  rationale: >
+    SmartScreen checks a program's reputation before it runs, which catches the
+    large class of attacks that use a brand new executable nobody has ever seen
+    before. Signature-based scanning cannot help with a file that was compiled an
+    hour ago specifically for this campaign; reputation can, because the file has
+    no history. It is also the layer that warns about known phishing pages.
+  blast_radius: >
+    Running unsigned or newly built software - including your own compiled
+    binaries - will show a warning that must be clicked through. Developers
+    sometimes turn this off for that reason.
+  params:
+    - name: previous
+      type: enum
+      choices: [Off, Warn, Block, Unset]
+      description: The SmartScreen setting found before the change.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer'
+    $val = (Get-ItemProperty -Path $key -Name SmartScreenEnabled -ErrorAction SilentlyContinue).SmartScreenEnabled
+    $prev = if ([string]::IsNullOrEmpty("$val")) { 'Unset' } else { "$val" }
+    $ok = ($prev -eq 'Warn' -or $prev -eq 'Block' -or $prev -eq 'RequireAdmin')
+    [pscustomobject]@{
+      compliant = $ok
+      observed  = if ($ok) { "SmartScreen is set to $prev" }
+                  else { 'SmartScreen is not checking apps and downloads' }
+      evidence  = "SmartScreenEnabled=$prev"
+      params    = @{ previous = $(if ($prev -eq 'Off' -or $prev -eq 'Unset') { $prev } else { 'Unset' }) }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer'
+    New-ItemProperty -Path $key -Name SmartScreenEnabled -Value 'Warn' -PropertyType String -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer'
+    if ('{previous}' -eq 'Unset') {
+      Remove-ItemProperty -Path $key -Name SmartScreenEnabled -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name SmartScreenEnabled -Value '{previous}' -PropertyType String -Force | Out-Null
+    }
+
+- id: DEF-006
+  title: The firewall is not recording what it blocks
+  domain: defence
+  severity: low
+  risk: safe
+  tags: [firewall, logging, visibility]
+  depends_on: [NET-001]
+  references:
+    - "https://learn.microsoft.com/powershell/module/netsecurity/set-netfirewallprofile"
+  rationale: >
+    By default the Windows firewall drops unwanted traffic silently and keeps no
+    record of it. That means there is no way to answer the question "has anything
+    been probing this machine", which is the first question worth asking after any
+    suspicion of compromise. Turning on dropped-packet logging costs a small text
+    file and gives the machine a memory.
+  blast_radius: >
+    Writes a capped log file under the Windows firewall log directory. No traffic
+    behaviour changes at all; this only records what already happens.
+  params:
+    - name: profile
+      type: enum
+      choices: [Domain, Private, Public]
+      description: Which firewall profile should start logging dropped packets.
+  detect: |
+    $bad = @(Get-NetFirewallProfile -Profile Domain,Private,Public |
+             Where-Object { "$($_.LogBlocked)" -ne 'True' })
+    $names = @($bad | ForEach-Object { "$($_.Name)" })
+    [pscustomobject]@{
+      compliant = ($bad.Count -eq 0)
+      observed  = if ($bad.Count -eq 0) { 'All profiles log dropped packets' }
+                  else { 'Dropped packets are not logged on: ' + ($names -join ', ') }
+      evidence  = (Get-NetFirewallProfile -Profile Domain,Private,Public |
+                   ForEach-Object { "$($_.Name) LogBlocked=$($_.LogBlocked)" }) -join '; '
+      instances = @($bad | ForEach-Object {
+                    [pscustomobject]@{
+                      params   = @{ profile = "$($_.Name)" }
+                      observed = "The $($_.Name) profile does not log dropped packets"
+                    } })
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    Set-NetFirewallProfile -Profile {profile} -LogBlocked True -LogMaxSizeKilobytes 16384
+  rollback: |
+    Set-NetFirewallProfile -Profile {profile} -LogBlocked False
+
+- id: DEF-007
+  title: The system drive is not encrypted
+  domain: defence
+  severity: high
+  risk: intrusive
+  tags: [bitlocker, encryption, physical]
+  references:
+    - "https://learn.microsoft.com/windows/security/operating-system-security/data-protection/bitlocker/"
+  rationale: >
+    Without full-disk encryption, every protection on this list can be bypassed by
+    someone who has the machine in their hands for ten minutes: boot from a USB
+    stick, mount the drive, and read or modify anything, including the password
+    database and the registry hives that hold the credentials. Encryption is the
+    control that makes physical possession stop being total control. It matters
+    most on laptops, which get left in cars.
+  blast_radius: >
+    Starting encryption rewrites the whole drive, needs a recovery key stored
+    somewhere safe, can require firmware changes to enable the TPM, and will make
+    the machine unbootable if the key is lost. That is a decision for a person who
+    knows where they will keep the key, not for an automated loop at three in the
+    morning. Lares reports the state and stops.
+  detect: |
+    $vol = $null
+    try { $vol = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop } catch { }
+    if ($null -eq $vol) {
+      [pscustomobject]@{
+        compliant = $false
+        observed  = 'BitLocker is not available or not configured on the system drive'
+        evidence  = 'Get-BitLockerVolume returned nothing'
+      } | ConvertTo-Json -Depth 5 -Compress
+    } else {
+      $on = ("$($vol.ProtectionStatus)" -eq 'On')
+      [pscustomobject]@{
+        compliant = $on
+        observed  = if ($on) { "The system drive is encrypted ($($vol.VolumeStatus))" }
+                    else { "The system drive is not protected by BitLocker ($($vol.VolumeStatus))" }
+        evidence  = "ProtectionStatus=$($vol.ProtectionStatus); VolumeStatus=$($vol.VolumeStatus); EncryptionPercentage=$($vol.EncryptionPercentage)"
+      } | ConvertTo-Json -Depth 5 -Compress
+    }

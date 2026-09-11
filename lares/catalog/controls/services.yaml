@@ -1,0 +1,238 @@
+# Services, drivers and scheduled tasks - the local privilege escalation surface.
+
+- id: SVC-001
+  title: A service runs from an unquoted path containing spaces
+  domain: services
+  severity: high
+  risk: safe
+  tags: [privilege-escalation, services]
+  references:
+    - "https://learn.microsoft.com/windows/win32/services/service-record-list"
+    - "MITRE ATT&CK T1574.009"
+  rationale: >
+    When a service's command line is not wrapped in quotes and the path contains a
+    space, Windows does not know where the program name ends. Faced with
+    C:\Program Files\Some App\service.exe it tries C:\Program.exe first, then
+    C:\Program Files\Some.exe, and so on. If any user can write a file at one of
+    those earlier names, that file runs as the service account - usually SYSTEM -
+    at the next boot. It is a thirty-year-old bug class that still ships in
+    commercial installers today, and the fix is to add the missing quotes.
+  blast_radius: >
+    Adds a pair of quotes around the executable in the service's registry entry,
+    leaving any arguments untouched. The service continues to start from exactly
+    the same binary. Rollback strips the quotes again.
+  params:
+    - name: service
+      type: string
+      pattern: '^[A-Za-z0-9_.-]{1,80}$'
+      description: The short service name, as listed by Get-Service.
+  detect: |
+    $rows = @()
+    foreach ($s in Get-CimInstance Win32_Service -ErrorAction SilentlyContinue) {
+      $p = "$($s.PathName)"
+      if ([string]::IsNullOrWhiteSpace($p)) { continue }
+      if ($p.TrimStart().StartsWith('"')) { continue }
+      $idx = $p.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
+      $exe = if ($idx -ge 0) { $p.Substring(0, $idx + 4) } else { $p }
+      if ($exe -notmatch ' ') { continue }
+      if ("$($s.Name)" -notmatch '^[A-Za-z0-9_.-]{1,80}$') { continue }
+      $rows += [pscustomobject]@{ Name = "$($s.Name)"; Display = "$($s.DisplayName)"; Path = $p }
+    }
+    $rows = @($rows | Sort-Object Name -Unique)
+    [pscustomobject]@{
+      compliant = ($rows.Count -eq 0)
+      observed  = if ($rows.Count -eq 0) { 'No service runs from an unquoted path with spaces' }
+                  else { "$($rows.Count) service(s) run from an unquoted path: " +
+                         (($rows | ForEach-Object { $_.Name }) -join ', ') }
+      evidence  = ($rows | ForEach-Object { "$($_.Name): $($_.Path)" }) -join "`n"
+      instances = @($rows | ForEach-Object {
+                    [pscustomobject]@{
+                      params   = @{ service = $_.Name }
+                      observed = "Service $($_.Name) starts from unquoted $($_.Path)"
+                      evidence = "$($_.Display)"
+                    } })
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\{service}'
+    $cur = "$((Get-ItemProperty -Path $key -Name ImagePath -ErrorAction Stop).ImagePath)"
+    if (-not $cur.TrimStart().StartsWith('"')) {
+      $idx = $cur.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
+      if ($idx -ge 0) {
+        $exe  = $cur.Substring(0, $idx + 4)
+        $rest = $cur.Substring($idx + 4)
+        Set-ItemProperty -Path $key -Name ImagePath -Value ('"' + $exe + '"' + $rest)
+      }
+    }
+  rollback: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\{service}'
+    $cur = "$((Get-ItemProperty -Path $key -Name ImagePath -ErrorAction Stop).ImagePath)"
+    if ($cur -match '^"([^"]+)"(.*)$') {
+      Set-ItemProperty -Path $key -Name ImagePath -Value ($Matches[1] + $Matches[2])
+    }
+
+- id: SVC-002
+  title: A service runs a program from a directory users can write to
+  domain: services
+  severity: critical
+  risk: intrusive
+  tags: [privilege-escalation, services, acl]
+  references:
+    - "MITRE ATT&CK T1574.010"
+  rationale: >
+    If the folder holding a service's executable is writable by ordinary users,
+    then any ordinary user can replace that executable and have their own code run
+    as the service account at the next restart. This is a complete local privilege
+    escalation that requires no exploit and no special skill - just a file copy.
+    It usually comes from an application installed outside Program Files, into a
+    folder that inherited permissive permissions from the root of the drive.
+  blast_radius: >
+    The fix is to tighten the folder's permissions, but doing that automatically
+    risks breaking the application itself - some legitimately need to write to
+    their own directory to update or to store data, and removing that access
+    leaves software that no longer starts. Which permissions are safe to remove
+    depends on what the application does, so Lares reports the finding with the
+    exact path and the offending access entry, and leaves the change to a person.
+  detect: |
+    $safe = @('C:\Windows', 'C:\Program Files', 'C:\Program Files (x86)')
+    $risky = 'Everyone|BUILTIN\\Users|Authenticated Users|INTERACTIVE'
+    $rows = @()
+    foreach ($s in Get-CimInstance Win32_Service -ErrorAction SilentlyContinue) {
+      $p = "$($s.PathName)"
+      if ([string]::IsNullOrWhiteSpace($p)) { continue }
+      $idx = $p.IndexOf('.exe', [System.StringComparison]::OrdinalIgnoreCase)
+      $exe = if ($idx -ge 0) { $p.Substring(0, $idx + 4) } else { $p }
+      $exe = $exe.Trim().Trim('"')
+      if (-not (Test-Path -LiteralPath $exe)) { continue }
+      $dir = Split-Path -Parent $exe
+      $skip = $false
+      foreach ($s2 in $safe) { if ($dir -like "$s2*") { $skip = $true } }
+      if ($skip) { continue }
+      try { $acl = Get-Acl -LiteralPath $dir -ErrorAction Stop } catch { continue }
+      foreach ($ace in $acl.Access) {
+        if ("$($ace.IdentityReference)" -match $risky -and
+            "$($ace.FileSystemRights)" -match 'Write|Modify|FullControl' -and
+            "$($ace.AccessControlType)" -eq 'Allow') {
+          $rows += [pscustomobject]@{
+            Name = "$($s.Name)"; Dir = $dir
+            Who  = "$($ace.IdentityReference)"; Rights = "$($ace.FileSystemRights)"
+          }
+          break
+        }
+      }
+    }
+    [pscustomobject]@{
+      compliant = ($rows.Count -eq 0)
+      observed  = if ($rows.Count -eq 0) { 'No service executable sits in a user-writable folder' }
+                  else { "$($rows.Count) service(s) run from a user-writable folder: " +
+                         (($rows | ForEach-Object { $_.Name }) -join ', ') }
+      evidence  = ($rows | ForEach-Object { "$($_.Name): $($_.Dir) grants $($_.Rights) to $($_.Who)" }) -join "`n"
+    } | ConvertTo-Json -Depth 5 -Compress
+
+- id: SVC-003
+  title: Ordinary users can install printer drivers
+  domain: services
+  severity: high
+  risk: safe
+  tags: [printnightmare, drivers, privilege-escalation]
+  references:
+    - "https://learn.microsoft.com/troubleshoot/windows-server/printing/point-and-print-default-behavior-change"
+    - "CVE-2021-34527 PrintNightmare"
+  rationale: >
+    A printer driver is kernel-adjacent code that the print spooler loads as
+    SYSTEM. Point and Print lets a workstation fetch and install a driver from a
+    print server automatically, and when that is not restricted to administrators,
+    any user - or anything running as any user - can point the machine at a server
+    they control and have it install their driver as SYSTEM. This is the
+    PrintNightmare family of bugs. Restricting driver installation to
+    administrators closes it while leaving printing itself working, which is why
+    it is preferable to the common advice of simply disabling the spooler.
+  blast_radius: >
+    Users who currently add a network printer themselves will need an
+    administrator to approve the driver installation the first time. Printing to
+    already-installed printers is unaffected.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 1
+      description: The RestrictDriverInstallationToAdministrators value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint'
+    $val = (Get-ItemProperty -Path $key -Name RestrictDriverInstallationToAdministrators -ErrorAction SilentlyContinue).RestrictDriverInstallationToAdministrators
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    $spooler = Get-Service -Name Spooler -ErrorAction SilentlyContinue
+    $running = ($null -ne $spooler -and "$($spooler.Status)" -eq 'Running')
+    [pscustomobject]@{
+      compliant = (($prev -eq 1) -or (-not $running))
+      observed  = if ($prev -eq 1) { 'Only administrators may install printer drivers' }
+                  elseif (-not $running) { 'The print spooler is not running' }
+                  else { 'Any user can make the spooler install a printer driver as SYSTEM' }
+      evidence  = "RestrictDriverInstallationToAdministrators=$(if ($prev -lt 0) { '<not set>' } else { $prev }); Spooler=$(if ($running) { 'Running' } else { 'Stopped' })"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint'
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    New-ItemProperty -Path $key -Name RestrictDriverInstallationToAdministrators -Value 1 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name RestrictDriverInstallationToAdministrators -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name RestrictDriverInstallationToAdministrators -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: SVC-004
+  title: A scheduled task runs as SYSTEM from a user-writable location
+  domain: services
+  severity: critical
+  risk: intrusive
+  tags: [privilege-escalation, scheduled-tasks, persistence]
+  references:
+    - "MITRE ATT&CK T1053.005"
+  rationale: >
+    Scheduled tasks are the quietest form of persistence on Windows, and one that
+    runs as SYSTEM while executing a script or program from a folder any user can
+    modify is the same privilege escalation as a writable service binary, on a
+    timer. It is also a favourite hiding place, because most people never look at
+    the task library. A task like this is either a badly packaged application or
+    somebody else's foothold.
+  blast_radius: >
+    The right response depends entirely on which it is. Deleting a legitimate
+    application's task breaks that application; tightening the folder may break it
+    too. Lares reports the task name, its author, what it runs and who can write
+    there, so a person can tell the two cases apart.
+  detect: |
+    $risky = 'Everyone|BUILTIN\\Users|Authenticated Users|INTERACTIVE'
+    $rows = @()
+    foreach ($t in Get-ScheduledTask -ErrorAction SilentlyContinue) {
+      $ctx = "$($t.Principal.UserId)$($t.Principal.GroupId)"
+      if ($ctx -notmatch 'SYSTEM|S-1-5-18|Administrators|S-1-5-32-544') { continue }
+      foreach ($a in @($t.Actions)) {
+        $exe = "$($a.Execute)"
+        if ([string]::IsNullOrWhiteSpace($exe)) { continue }
+        $exe = [System.Environment]::ExpandEnvironmentVariables($exe.Trim().Trim('"'))
+        if (-not (Test-Path -LiteralPath $exe -ErrorAction SilentlyContinue)) { continue }
+        $dir = Split-Path -Parent $exe
+        if ($dir -like 'C:\Windows*') { continue }
+        try { $acl = Get-Acl -LiteralPath $dir -ErrorAction Stop } catch { continue }
+        foreach ($ace in $acl.Access) {
+          if ("$($ace.IdentityReference)" -match $risky -and
+              "$($ace.FileSystemRights)" -match 'Write|Modify|FullControl' -and
+              "$($ace.AccessControlType)" -eq 'Allow') {
+            $rows += [pscustomobject]@{
+              Task = "$($t.TaskPath)$($t.TaskName)"; Run = $exe
+              Who = "$($ace.IdentityReference)"; Ctx = $ctx
+            }
+            break
+          }
+        }
+      }
+    }
+    $rows = @($rows | Sort-Object Task -Unique)
+    [pscustomobject]@{
+      compliant = ($rows.Count -eq 0)
+      observed  = if ($rows.Count -eq 0) { 'No privileged scheduled task runs from a user-writable folder' }
+                  else { "$($rows.Count) privileged task(s) run from a user-writable folder" }
+      evidence  = ($rows | ForEach-Object { "$($_.Task) runs $($_.Run) as $($_.Ctx); folder writable by $($_.Who)" }) -join "`n"
+    } | ConvertTo-Json -Depth 5 -Compress

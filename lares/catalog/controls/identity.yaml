@@ -1,0 +1,378 @@
+# Accounts, privilege and credential-handling controls.
+#
+# Several of these restore a registry value, and putting the machine back
+# exactly as it was means knowing what was there before. Those controls declare
+# a `previous` parameter which the detect probe fills in with the current value,
+# using -1 to mean "the value was not present at all". The rollback reads it and
+# either restores the old number or removes the value again.
+
+- id: IDN-001
+  title: User Account Control is switched off
+  domain: identity
+  severity: critical
+  risk: caution
+  effective: restart
+  tags: [uac, privilege, elevation]
+  references:
+    - "https://learn.microsoft.com/windows/security/identity-protection/user-account-control/"
+  rationale: >
+    User Account Control is what stops a program you launched as a normal user
+    from quietly gaining administrator rights. With EnableLUA set to zero, every
+    process started by an administrator runs fully elevated with no prompt and no
+    token filtering, so a malicious document or download inherits complete control
+    of the machine the moment it runs. Turning UAC off does not merely remove a
+    prompt; it removes the boundary the prompt was guarding.
+  blast_radius: >
+    Restoring UAC takes effect after a restart. Badly written legacy software that
+    was relying on silent elevation may start prompting or failing. This is the
+    intended behaviour and the reason the boundary exists.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 1
+      description: The EnableLUA value found before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    $val = (Get-ItemProperty -Path $key -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    [pscustomobject]@{
+      compliant = ($prev -eq 1)
+      observed  = if ($prev -eq 1) { 'User Account Control is enabled' }
+                  else { 'User Account Control is disabled - administrators run fully elevated with no prompt' }
+      evidence  = "EnableLUA=$(if ($prev -lt 0) { '<not set>' } else { $prev })"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    New-ItemProperty -Path $key -Name EnableLUA -Value 1 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name EnableLUA -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name EnableLUA -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: IDN-002
+  title: Administrators elevate without being asked
+  domain: identity
+  severity: high
+  risk: safe
+  tags: [uac, privilege, elevation]
+  depends_on: [IDN-001]
+  references:
+    - "https://learn.microsoft.com/windows/security/identity-protection/user-account-control/user-account-control-security-policy-settings"
+  rationale: >
+    Even with UAC switched on, the consent prompt for administrators can be set to
+    elevate silently. That setting means any program an administrator runs can
+    take full control of the machine without the user ever seeing that it asked.
+    The prompt is the only moment a person gets to notice that a spreadsheet or a
+    screensaver is requesting system-wide rights, so removing it removes the one
+    signal that something is wrong.
+  blast_radius: >
+    Elevation requests will start showing a consent dialog again, on the secure
+    desktop. Nothing stops working; some tasks gain a click.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 5
+      description: The ConsentPromptBehaviorAdmin value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    $val = (Get-ItemProperty -Path $key -Name ConsentPromptBehaviorAdmin -ErrorAction SilentlyContinue).ConsentPromptBehaviorAdmin
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    [pscustomobject]@{
+      compliant = ($prev -ne 0)
+      observed  = if ($prev -eq 0) { 'Administrators are elevated silently, with no consent prompt' }
+                  else { "Elevation prompts administrators (ConsentPromptBehaviorAdmin=$prev)" }
+      evidence  = "ConsentPromptBehaviorAdmin=$(if ($prev -lt 0) { '<not set>' } else { $prev })"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    New-ItemProperty -Path $key -Name ConsentPromptBehaviorAdmin -Value 5 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $key -Name PromptOnSecureDesktop -Value 1 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name ConsentPromptBehaviorAdmin -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name ConsentPromptBehaviorAdmin -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: IDN-003
+  title: Built-in Guest account is enabled
+  domain: identity
+  severity: medium
+  risk: caution
+  tags: [accounts, anonymous]
+  references:
+    - "CIS Microsoft Windows Benchmark, Accounts: Guest account status"
+  rationale: >
+    The Guest account is a passwordless local account that Windows has shipped
+    disabled for two decades. When it is on, anyone with physical or network reach
+    can authenticate as a real local user with no credential at all, which is
+    enough to enumerate shares and map the machine even though Guest itself has
+    few privileges. There is no modern use for it.
+  blast_radius: >
+    Anyone currently relying on Guest to reach a share loses that access. On a
+    machine where Guest was enabled deliberately for an open kiosk share, this is
+    a real change; rollback re-enables the account.
+  detect: |
+    $g = Get-LocalUser -Name 'Guest' -ErrorAction SilentlyContinue
+    if ($null -eq $g) {
+      [pscustomobject]@{ compliant = $true; observed = 'No local Guest account exists' } |
+        ConvertTo-Json -Depth 5 -Compress
+    } else {
+      [pscustomobject]@{
+        compliant = (-not $g.Enabled)
+        observed  = if ($g.Enabled) { 'The built-in Guest account is enabled' }
+                    else { 'The built-in Guest account is disabled' }
+        evidence  = "Guest.Enabled=$($g.Enabled); LastLogon=$($g.LastLogon)"
+      } | ConvertTo-Json -Depth 5 -Compress
+    }
+  remediate: |
+    Disable-LocalUser -Name 'Guest'
+  rollback: |
+    Enable-LocalUser -Name 'Guest'
+
+- id: IDN-004
+  title: A logon password is stored in the registry in clear text
+  domain: identity
+  severity: critical
+  risk: intrusive
+  tags: [credentials, autologon, cleartext]
+  references:
+    - "https://learn.microsoft.com/troubleshoot/windows-server/user-profiles-and-logon/turn-on-automatic-logon"
+  rationale: >
+    Automatic logon works by storing the account's password as a plain string in
+    the registry under DefaultPassword, in a location every local user can read.
+    Any program running as any user on the machine - including one that has no
+    privileges at all - can read that value and immediately hold working
+    credentials for the account, which is usually an administrator. This is the
+    rare finding that hands over a working password rather than a hash.
+  blast_radius: >
+    Automatic logon stops working and the machine presents a logon screen at boot.
+    That is the point, but it is also why this one waits for a person: on a kiosk,
+    a media box or a machine nobody has typed the password into for two years,
+    removing automatic logon can leave the owner locked out of their own computer.
+    Lares reports it, explains it, and stops there.
+  rollback_policy: irreversible
+  rollback_note: >
+    The stored password is deleted, not stashed somewhere else. Lares will not
+    keep a copy of a clear-text credential in order to be able to put it back, so
+    this change cannot be undone automatically and never runs autonomously.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+    $p   = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+    $has = -not [string]::IsNullOrEmpty("$($p.DefaultPassword)")
+    $auto = "$($p.AutoAdminLogon)" -eq '1'
+    [pscustomobject]@{
+      compliant = (-not $has)
+      observed  = if ($has) {
+                    "A clear-text password is stored for $($p.DefaultUserName) (AutoAdminLogon=$($p.AutoAdminLogon))"
+                  } else { 'No clear-text logon password is stored in the registry' }
+      evidence  = "AutoAdminLogon=$($p.AutoAdminLogon); DefaultUserName=$($p.DefaultUserName); DefaultPassword=$(if ($has) { '<present, not shown>' } else { '<absent>' })"
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+    Remove-ItemProperty -Path $key -Name DefaultPassword -ErrorAction SilentlyContinue
+    New-ItemProperty -Path $key -Name AutoAdminLogon -Value '0' -PropertyType String -Force | Out-Null
+
+- id: IDN-005
+  title: WDigest is configured to keep passwords in memory
+  domain: identity
+  severity: high
+  risk: safe
+  effective: logon
+  tags: [credentials, lsass, mimikatz]
+  references:
+    - "https://learn.microsoft.com/windows-server/security/kerberos/"
+    - "KB2871997"
+  rationale: >
+    WDigest is an obsolete authentication provider that, when UseLogonCredential is
+    set to one, causes Windows to keep every logged-on user's password in memory in
+    a form that can be read back as plain text. Anyone who gets administrator
+    rights on the machine can then dump not just password hashes but the actual
+    passwords, including those of any domain administrator who has logged in. It
+    is off by default since Windows 8.1 and is almost always switched on either by
+    very old software or by an attacker preparing to harvest credentials.
+  blast_radius: >
+    Applications that genuinely still require WDigest digest authentication would
+    stop being able to authenticate. Practically nothing does. Takes effect at next
+    logon.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 1
+      description: The UseLogonCredential value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest'
+    $val = (Get-ItemProperty -Path $key -Name UseLogonCredential -ErrorAction SilentlyContinue).UseLogonCredential
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    [pscustomobject]@{
+      compliant = ($prev -ne 1)
+      observed  = if ($prev -eq 1) { 'WDigest is keeping clear-text passwords in memory' }
+                  else { 'WDigest is not caching clear-text passwords' }
+      evidence  = "UseLogonCredential=$(if ($prev -lt 0) { '<not set>' } else { $prev })"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest'
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    New-ItemProperty -Path $key -Name UseLogonCredential -Value 0 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name UseLogonCredential -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name UseLogonCredential -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: IDN-006
+  title: LSASS is not running as a protected process
+  domain: identity
+  severity: high
+  risk: caution
+  effective: restart
+  tags: [credentials, lsass, ppl]
+  references:
+    - "https://learn.microsoft.com/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection"
+  rationale: >
+    LSASS is the process that holds every credential in use on the machine, which
+    makes it the first thing any credential-stealing tool reaches for. Running it
+    as a Protected Process Light means the kernel refuses to let another process
+    open a handle to it for reading, even one running as administrator, unless
+    that process is itself signed at the same protection level. It is the
+    difference between an attacker with local admin having your passwords and
+    having to work considerably harder for them.
+  blast_radius: >
+    Takes effect after a restart. Security and debugging tools that legitimately
+    read LSASS memory - some EDR agents and crash-dump tooling - may stop working
+    unless they are signed for it. Rollback removes the value.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 2
+      description: The RunAsPPL value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    $val = (Get-ItemProperty -Path $key -Name RunAsPPL -ErrorAction SilentlyContinue).RunAsPPL
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    [pscustomobject]@{
+      compliant = ($prev -ge 1)
+      observed  = if ($prev -ge 1) { 'LSA protection is configured' }
+                  else { 'LSASS runs unprotected - its memory can be read by any administrator' }
+      evidence  = "RunAsPPL=$(if ($prev -lt 0) { '<not set>' } else { $prev })"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    New-ItemProperty -Path $key -Name RunAsPPL -Value 1 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name RunAsPPL -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name RunAsPPL -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: IDN-007
+  title: Anonymous users can enumerate accounts and shares
+  domain: identity
+  severity: medium
+  risk: caution
+  effective: restart
+  tags: [anonymous, reconnaissance, smb]
+  references:
+    - "CIS Microsoft Windows Benchmark, Network access: Do not allow anonymous enumeration"
+  rationale: >
+    A null session is a connection made with no username and no password. When
+    anonymous enumeration is permitted, such a connection can still list every
+    local account name and every share on the machine. That is the first step of
+    almost every internal attack, because knowing the real account names turns
+    password guessing from hopeless into practical, and knowing the shares shows
+    where the data is.
+  blast_radius: >
+    Legacy applications and very old NAS devices that browse shares anonymously
+    will no longer see them. Domain-joined machines occasionally depend on this
+    for downlevel trust relationships. Rollback restores the previous values.
+  params:
+    - name: previous_sam
+      type: int
+      min: -1
+      max: 1
+      description: The RestrictAnonymousSAM value before the change; -1 if unset.
+    - name: previous_all
+      type: int
+      min: -1
+      max: 1
+      description: The RestrictAnonymous value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    $p = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+    $sam = if ($null -eq $p.RestrictAnonymousSAM) { -1 } else { [int]$p.RestrictAnonymousSAM }
+    $all = if ($null -eq $p.RestrictAnonymous)    { -1 } else { [int]$p.RestrictAnonymous }
+    $ok = ($sam -eq 1) -and ($all -eq 1)
+    [pscustomobject]@{
+      compliant = $ok
+      observed  = if ($ok) { 'Anonymous enumeration of accounts and shares is blocked' }
+                  else { 'Anonymous connections can enumerate local accounts or shares' }
+      evidence  = "RestrictAnonymousSAM=$sam; RestrictAnonymous=$all (-1 means not set)"
+      params    = @{ previous_sam = $sam; previous_all = $all }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    New-ItemProperty -Path $key -Name RestrictAnonymousSAM -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $key -Name RestrictAnonymous    -Value 1 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+    if ({previous_sam} -lt 0) {
+      Remove-ItemProperty -Path $key -Name RestrictAnonymousSAM -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name RestrictAnonymousSAM -Value {previous_sam} -PropertyType DWord -Force | Out-Null
+    }
+    if ({previous_all} -lt 0) {
+      Remove-ItemProperty -Path $key -Name RestrictAnonymous -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name RestrictAnonymous -Value {previous_all} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: IDN-008
+  title: More local administrators than the machine needs
+  domain: identity
+  severity: medium
+  risk: intrusive
+  tags: [accounts, privilege, review]
+  references:
+    - "CIS Microsoft Windows Benchmark, Administrative accounts"
+  rationale: >
+    Every account in the local Administrators group is a complete copy of the keys
+    to the machine, and each one is another password that can be guessed, reused or
+    phished. Personal machines typically need exactly one. A list that has grown
+    over time - old support accounts, a vendor's install account, a second profile
+    made once for a family member - is the most common way an attacker finds a way
+    in that nobody is watching.
+  blast_radius: >
+    Deciding which administrator is surplus is a judgement about how the machine is
+    used, not a technical fact, and getting it wrong locks a real person out of
+    their own computer. Lares reports the membership and leaves the decision to a
+    person.
+  detect: |
+    $members = @()
+    try {
+      $members = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop)
+    } catch {
+      $members = @(Get-CimInstance Win32_GroupUser |
+                   Where-Object { $_.GroupComponent -match 'Administrators' })
+    }
+    $names = @($members | ForEach-Object { "$($_.Name)" })
+    [pscustomobject]@{
+      compliant = ($names.Count -le 2)
+      observed  = "$($names.Count) account(s) hold local administrator rights: " + ($names -join ', ')
+      evidence  = ($members | ForEach-Object { "$($_.Name) [$($_.ObjectClass)] $($_.PrincipalSource)" }) -join "`n"
+    } | ConvertTo-Json -Depth 5 -Compress

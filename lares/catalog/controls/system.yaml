@@ -1,0 +1,231 @@
+# Platform configuration: legacy engines, auditing, removable media, patching.
+
+- id: SYS-001
+  title: The PowerShell 2.0 engine is still installed
+  domain: system
+  severity: high
+  risk: caution
+  effective: restart
+  tags: [powershell, downgrade, logging-bypass]
+  references:
+    - "https://learn.microsoft.com/powershell/scripting/windows-powershell/wmf/setup/uninstalling-windows-powershell"
+    - "MITRE ATT&CK T1059.001"
+  rationale: >
+    Every logging and safety feature added to PowerShell in the last decade -
+    script block logging, transcription, the Antimalware Scan Interface, constrained
+    language mode - lives in version 5. Version 2 has none of them. As long as the
+    old engine is installed, any script can ask for it by adding -Version 2 to the
+    command line and run completely unobserved on a machine that believes it is
+    logging everything. Removing the engine is the only way to close that door, and
+    nothing written this decade needs it.
+  blast_radius: >
+    Scripts and installers that explicitly request the version 2 engine will fail.
+    These are rare and generally predate 2012. The change needs a restart to
+    complete; rollback re-enables the optional feature.
+  detect: |
+    $f = Get-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root -ErrorAction SilentlyContinue
+    if ($null -eq $f) {
+      [pscustomobject]@{ compliant = $true; observed = 'The PowerShell 2.0 feature is not present on this edition' } |
+        ConvertTo-Json -Depth 5 -Compress
+    } else {
+      $on = ("$($f.State)" -eq 'Enabled')
+      [pscustomobject]@{
+        compliant = (-not $on)
+        observed  = if ($on) { 'The PowerShell 2.0 engine is installed and can be used to bypass script logging' }
+                    else { 'The PowerShell 2.0 engine is removed' }
+        evidence  = "MicrosoftWindowsPowerShellV2Root.State=$($f.State)"
+      } | ConvertTo-Json -Depth 5 -Compress
+    }
+  remediate: |
+    Disable-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root -NoRestart | Out-Null
+  rollback: |
+    Enable-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root -NoRestart -All | Out-Null
+
+- id: SYS-002
+  title: PowerShell is not recording the scripts it runs
+  domain: system
+  severity: medium
+  risk: safe
+  effective: logon
+  tags: [powershell, logging, visibility]
+  references:
+    - "https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_logging_windows"
+  rationale: >
+    Script block logging writes the actual text of every piece of PowerShell the
+    machine executes into the event log, after it has been decoded and
+    de-obfuscated. It is the single most useful source of evidence on a compromised
+    Windows machine, because almost every intrusion touches PowerShell at some
+    point and almost all of them obfuscate it. Without this, the event log records
+    that PowerShell ran, but not what it did.
+  blast_radius: >
+    Writes script text to the Microsoft-Windows-PowerShell/Operational event log.
+    The log is capped and rolls over. Be aware that a script which handles a secret
+    in plain text will have that secret recorded, so the log deserves the same
+    protection as any other sensitive file.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 1
+      description: The EnableScriptBlockLogging value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'
+    $val = (Get-ItemProperty -Path $key -Name EnableScriptBlockLogging -ErrorAction SilentlyContinue).EnableScriptBlockLogging
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    [pscustomobject]@{
+      compliant = ($prev -eq 1)
+      observed  = if ($prev -eq 1) { 'PowerShell script block logging is on' }
+                  else { 'PowerShell runs without recording what it executes' }
+      evidence  = "EnableScriptBlockLogging=$(if ($prev -lt 0) { '<not set>' } else { $prev })"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    New-ItemProperty -Path $key -Name EnableScriptBlockLogging -Value 1 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name EnableScriptBlockLogging -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name EnableScriptBlockLogging -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: SYS-003
+  title: Process auditing does not record command lines
+  domain: system
+  severity: medium
+  risk: safe
+  tags: [auditing, logging, visibility]
+  references:
+    - "https://learn.microsoft.com/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"
+  rationale: >
+    Windows can log every process the machine starts, but by default the log entry
+    contains only the program name. Almost everything interesting about a malicious
+    process is in its arguments - the URL it downloads from, the encoded command it
+    decodes, the file it targets. Turning on command-line recording changes event
+    4688 from "powershell.exe ran" into a full record of what was actually asked
+    for, which is frequently the difference between knowing you were attacked and
+    knowing how.
+  blast_radius: >
+    Increases the volume of the Security event log noticeably on a busy machine.
+    As with script logging, a command line containing a password will be recorded,
+    so treat the log accordingly.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 1
+      description: The ProcessCreationIncludeCmdLine_Enabled value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
+    $val = (Get-ItemProperty -Path $key -Name ProcessCreationIncludeCmdLine_Enabled -ErrorAction SilentlyContinue).ProcessCreationIncludeCmdLine_Enabled
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    $pol = (& "$env:SystemRoot\System32\auditpol.exe" /get /subcategory:"Process Creation") 2>$null | Out-String
+    $auditing = ($pol -match 'Success')
+    [pscustomobject]@{
+      compliant = (($prev -eq 1) -and $auditing)
+      observed  = if (($prev -eq 1) -and $auditing) { 'Process creation is audited with full command lines' }
+                  elseif (-not $auditing) { 'Process creation is not being audited at all' }
+                  else { 'Process creation is audited, but command lines are not recorded' }
+      evidence  = "ProcessCreationIncludeCmdLine_Enabled=$(if ($prev -lt 0) { '<not set>' } else { $prev }); auditpol_success=$auditing"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    New-ItemProperty -Path $key -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -PropertyType DWord -Force | Out-Null
+    & "$env:SystemRoot\System32\auditpol.exe" /set /subcategory:"Process Creation" /success:enable | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name ProcessCreationIncludeCmdLine_Enabled -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name ProcessCreationIncludeCmdLine_Enabled -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+    & "$env:SystemRoot\System32\auditpol.exe" /set /subcategory:"Process Creation" /success:disable | Out-Null
+
+- id: SYS-004
+  title: Windows runs programs from removable media automatically
+  domain: system
+  severity: medium
+  risk: safe
+  tags: [autorun, removable-media, usb]
+  references:
+    - "https://learn.microsoft.com/windows/security/threat-protection/security-policy-settings/"
+  rationale: >
+    AutoRun reads an instruction file from a disc or USB stick and executes what it
+    names, without asking. It is how Conficker and Stuxnet spread, and it is still
+    the mechanism behind USB drops in the car park. Disabling it means a plugged-in
+    device sits there inertly until a person deliberately opens something on it,
+    which is the behaviour almost everyone already assumes they have.
+  blast_radius: >
+    Installer discs and branded USB tools will no longer launch by themselves; they
+    have to be opened. No other behaviour changes.
+  params:
+    - name: previous
+      type: int
+      min: -1
+      max: 255
+      description: The NoDriveTypeAutoRun value before the change; -1 if unset.
+  detect: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+    $val = (Get-ItemProperty -Path $key -Name NoDriveTypeAutoRun -ErrorAction SilentlyContinue).NoDriveTypeAutoRun
+    $prev = if ($null -eq $val) { -1 } else { [int]$val }
+    [pscustomobject]@{
+      compliant = ($prev -eq 255)
+      observed  = if ($prev -eq 255) { 'AutoRun is disabled for every drive type' }
+                  else { 'AutoRun is still active for some drive types, including removable media' }
+      evidence  = "NoDriveTypeAutoRun=$(if ($prev -lt 0) { '<not set>' } else { $prev }) (255 disables all)"
+      params    = @{ previous = $prev }
+    } | ConvertTo-Json -Depth 5 -Compress
+  remediate: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+    if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+    New-ItemProperty -Path $key -Name NoDriveTypeAutoRun -Value 255 -PropertyType DWord -Force | Out-Null
+  rollback: |
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+    if ({previous} -lt 0) {
+      Remove-ItemProperty -Path $key -Name NoDriveTypeAutoRun -ErrorAction SilentlyContinue
+    } else {
+      New-ItemProperty -Path $key -Name NoDriveTypeAutoRun -Value {previous} -PropertyType DWord -Force | Out-Null
+    }
+
+- id: SYS-005
+  title: No security update has been installed recently
+  domain: system
+  severity: high
+  risk: intrusive
+  tags: [patching, updates]
+  references:
+    - "https://learn.microsoft.com/windows/deployment/update/"
+  rationale: >
+    Microsoft ships security fixes on the second Tuesday of every month, and the
+    exploits for them are usually public within days because the patch itself
+    shows what was wrong. A machine with no update in two months is missing at
+    least one round of fixes for bugs whose details are now published. This is the
+    most consequential finding on the list and also the most commonly ignored,
+    because updates are inconvenient.
+  blast_radius: >
+    Installing updates reboots the machine, sometimes at length, and occasionally
+    breaks a driver. An unattended loop that decides on its own to reboot a machine
+    in the middle of the night is not something Lares will do. It reports how far
+    behind the machine is and leaves the timing to whoever has to use it.
+  detect: |
+    $last = Get-HotFix -ErrorAction SilentlyContinue |
+            Where-Object { $_.InstalledOn } |
+            Sort-Object InstalledOn -Descending | Select-Object -First 1
+    if ($null -eq $last) {
+      [pscustomobject]@{
+        compliant = $false
+        observed  = 'No installed update history is available on this machine'
+        evidence  = 'Get-HotFix returned nothing with an install date'
+      } | ConvertTo-Json -Depth 5 -Compress
+    } else {
+      $days = [int]((Get-Date) - $last.InstalledOn).TotalDays
+      [pscustomobject]@{
+        compliant = ($days -le 45)
+        observed  = "The most recent update was installed $days day(s) ago ($($last.HotFixID))"
+        evidence  = "HotFixID=$($last.HotFixID); InstalledOn=$($last.InstalledOn); Description=$($last.Description)"
+      } | ConvertTo-Json -Depth 5 -Compress
+    }
