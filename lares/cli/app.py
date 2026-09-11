@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -778,7 +779,46 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point, wrapped so a double-clicked window cannot vanish.
+
+    Everything below this used to run unguarded on the menu path, which meant
+    that any failure before the first prompt - a broken catalogue, an
+    unwritable AppData, a missing DLL - closed the window faster than it could
+    be read. That is the exact problem the menu exists to solve, so the guard
+    has to be outside the menu rather than inside it.
+
+    ``argv is None`` marks the real entry point. The menu re-enters this
+    function to serve each of its items, and those nested calls must not each
+    stop for their own "press Enter", because the menu already does that.
+    """
+    top_level = argv is None
     raw = sys.argv[1:] if argv is None else argv
+    standalone = top_level and interactive.owns_console_alone()
+
+    try:
+        return _dispatch(raw)
+    except SystemExit:
+        # argparse exits this way when there is no command to parse. It has
+        # already printed its usage; the finally below keeps it on screen.
+        raise
+    except KeyboardInterrupt:
+        print()
+        return 130
+    except BaseException as exc:  # noqa: BLE001 - last line before the window shuts
+        traceback.print_exc()
+        try:
+            report = logs.get().error("cli", "Lares stopped unexpectedly", exc=exc)
+            print(f"\n  This was saved as {report.error_id}.")
+            print(f"  See it with: lares errors --show {report.error_id}")
+        except Exception:  # noqa: BLE001 - logging must not mask the real error
+            pass
+        return 1
+    finally:
+        if standalone:
+            interactive.pause_before_closing()
+
+
+def _dispatch(raw: list[str]) -> int:
     parser = build_parser()
 
     # Double-clicked from Explorer: there is no command to parse and no shell to
@@ -787,6 +827,7 @@ def main(argv: list[str] | None = None) -> int:
     if interactive.should_offer_menu(raw):
         logs.configure()
         logs.install_excepthook()
+        logs.record_startup("lares (menu)")
         console = Console()
         return interactive.run(console, lambda menu_argv: main(menu_argv))
 

@@ -53,9 +53,16 @@ def should_offer_menu(argv: list[str]) -> bool:
     """Whether to show the menu rather than parse arguments."""
     if argv:
         return False
-    if not sys.stdin or not sys.stdin.isatty():
-        return False          # piped or redirected: behave like a normal tool
-    return owns_console_alone()
+    if not owns_console_alone():
+        return False
+    # Piped or redirected input means something is driving this rather than
+    # somebody sitting at it, and a menu would block forever. A closed or
+    # detached stdin raises here rather than answering, and in a frozen build
+    # that is not rare - so it is treated as "no console to prompt on".
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, OSError, AttributeError):
+        return False
 
 
 # --------------------------------------------------------------------------
