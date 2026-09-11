@@ -269,3 +269,67 @@ def test_model_only_does_not_weaken_the_guard():
 
     assert plan.actions == []
     assert "IDN-008" in plan.deferred
+
+
+# --------------------------------------------------------------------------
+# Invented controls
+#
+# From a real 1.5B run on live Windows: the model deferred SYS-006 "The system
+# drive is not encrypted" and SYS-007 "The firewall is not recording what it
+# blocks". Both sound entirely plausible. Neither exists. They could never have
+# been executed - the guard checks actions against the catalogue - but they were
+# displayed under "Left alone", which claims Lares checked something it did not.
+# --------------------------------------------------------------------------
+
+def test_a_deferred_control_that_does_not_exist_is_not_shown():
+    scan = scan_with(finding("NET-005"))
+    planner, plan = plan_from({
+        "summary": "s",
+        "actions": [{"control_id": "NET-005", "rationale": "r", "order": 1}],
+        "deferred": {
+            "SYS-006": "The system drive is not encrypted",
+            "SYS-007": "The firewall is not recording what it blocks",
+        },
+    }, scan)
+
+    assert "SYS-006" not in plan.deferred
+    assert "SYS-007" not in plan.deferred
+    assert any("not in the catalogue" in n.text for n in planner.notes)
+
+
+def test_a_real_deferred_control_is_kept():
+    scan = scan_with(finding("NET-005"), finding("IDN-005"))
+    _, plan = plan_from({
+        "summary": "s",
+        "actions": [{"control_id": "NET-005", "rationale": "r", "order": 1}],
+        "deferred": {"IDN-005": "an old application still needs WDigest"},
+    }, scan)
+
+    assert plan.deferred["IDN-005"] == "an old application still needs WDigest"
+
+
+def test_a_lowercase_deferred_id_still_matches():
+    scan = scan_with(finding("NET-005"), finding("IDN-005"))
+    _, plan = plan_from({
+        "summary": "s",
+        "actions": [{"control_id": "NET-005", "rationale": "r", "order": 1}],
+        "deferred": {"idn-005": "still needed here"},
+    }, scan)
+
+    assert "IDN-005" in plan.deferred
+
+
+def test_a_long_rationale_does_not_end_mid_word():
+    """A real plan ended on '...which is reading the mem', which reads like the
+    program broke rather than like a sentence was too long."""
+    scan = scan_with(finding("NET-005"))
+    _, plan = plan_from({
+        "summary": "s",
+        "actions": [{"control_id": "NET-005", "order": 1,
+                     "rationale": "word " * 300}],
+    }, scan)
+
+    rationale = plan.actions[0].rationale
+    assert len(rationale) <= 404
+    assert rationale.endswith("...")
+    assert not rationale.rstrip(".").endswith("wor")

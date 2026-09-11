@@ -331,10 +331,31 @@ class Planner:
             by_control.setdefault(finding.control_id, []).append(finding)
 
         deferred: dict[str, str] = dict(blocked)
+        # Deferred entries go through the same catalogue check as actions.
+        # They did not, and a 1.5B model on a real machine duly invented
+        # SYS-006 "The system drive is not encrypted" and SYS-007 "The firewall
+        # is not recording what it blocks" - plausible-sounding controls that
+        # do not exist. They could never have been executed, because the guard
+        # stops that, but they were displayed in "Left alone" as though Lares
+        # had checked them and chosen not to act. Claiming to have checked
+        # something you have not is worse than saying nothing.
         raw_deferred = raw.get("deferred")
+        invented: list[str] = []
         if isinstance(raw_deferred, dict):
             for key, value in raw_deferred.items():
-                deferred.setdefault(str(key), str(value)[:300])
+                control_id = str(key).strip().upper()
+                if control_id not in self.catalog:
+                    invented.append(control_id)
+                    continue
+                deferred.setdefault(control_id, str(value)[:300])
+
+        if invented:
+            self.notes.append(PlanNote(
+                "warn",
+                f"The model referred to {', '.join(sorted(invented))}, which "
+                f"{'is' if len(invented) == 1 else 'are'} not in the catalogue. "
+                "Not shown, because Lares did not check for them.",
+            ))
 
         actions: list[PlannedAction] = []
         seen: set[str] = set()
@@ -369,7 +390,7 @@ class Planner:
             actions.append(PlannedAction(
                 control_id=control.id,
                 params=params,
-                rationale=str(item.get("rationale", "") or "")[:400],
+                rationale=_trim(str(item.get("rationale", "") or "")),
                 confidence=_clamp_int(item.get("confidence"), 50),
                 order=_clamp_int(item.get("order"), len(actions) + 1),
             ))
@@ -502,6 +523,21 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, dict):
         return [value]
     return []
+
+
+def _trim(text: str, limit: int = 400) -> str:
+    """Shorten a rationale without cutting a word in half.
+
+    The model writes to whatever length it likes and the display has a budget.
+    Slicing at a fixed offset ended a real plan on "...which is reading the
+    mem", which reads like the program broke rather than like a sentence was
+    too long.
+    """
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(",;:")
+    return f"{cut}..."
 
 
 def _clamp_int(value: Any, default: int) -> int:

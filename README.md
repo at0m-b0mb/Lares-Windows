@@ -281,7 +281,7 @@ a change that needs a restart to reveal its effect.
 
 ## Status, stated plainly
 
-**v0.2.1. The engine is tested; the PowerShell is not.**
+**v0.2.2. The engine is tested; the PowerShell is not.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
 loader, the logging, the theme — is covered by **357 tests** that run on Windows
