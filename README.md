@@ -171,6 +171,32 @@ model the sole decision-maker: its answer is the whole plan, nothing is
 appended to it, and if it cannot answer then nothing is changed rather than
 the built-in planner quietly deciding instead.
 
+### Seeing it work
+
+`lares demo` walks through one full round trip and shows the working at every
+step — and the artefacts are real, not illustrations. The prompt shown is the
+prompt sent, the reply is the reply received, and the PowerShell is what would
+execute, character for character.
+
+```powershell
+lares demo
+```
+
+```
+1. What it reads off the machine          30 controls, 28 findings, and the probe behind one
+2. What it asks the model                 the rules, the machine, and whether it fits the window
+3. What the model answers                 the raw JSON, verbatim
+4. What the guard makes of it             accepted, and refused with reasons
+5. The exact PowerShell that would run    the remediation, and its undo
+6. Applying it                            probe, snapshot, apply, verify, health, decide
+7. What gets written down                 journal, activity log, transcript
+```
+
+It changes nothing — stage six is a dry run. With no model installed it uses a
+recorded reply from Qwen2.5-Coder 1.5B, kept verbatim **including the control
+id it invented**, because a demonstration where the model never errs teaches
+the wrong lesson about what stage four is for.
+
 ## Why you can leave it running
 
 You asked for no confirmation dialogs. So the safety is not a prompt — it is that
@@ -314,10 +340,10 @@ a change that needs a restart to reveal its effect.
 
 ## Status, stated plainly
 
-**v0.3.1. The engine is tested; the PowerShell is not.**
+**v0.4.0. The engine is tested; the PowerShell is not.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **424 tests** that run on Windows
+loader, the logging, the theme — is covered by **434 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 What has **not** happened is any of the thirty controls executing against a live
@@ -359,7 +385,7 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-424 tests, none of which need Windows. They cover the guard against injection
+434 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay

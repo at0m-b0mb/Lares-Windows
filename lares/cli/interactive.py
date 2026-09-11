@@ -116,6 +116,10 @@ ITEMS: list[tuple[str, str, list[str]]] = [
     ("Can this machine run it?",
      "What is present, what is missing, and what to do about it.",
      ["doctor"]),
+    ("Show me how it works",
+     "One round trip with the working shown: the prompt, the model's reply, "
+     "what the guard made of it, and the exact script.",
+     ["demo"]),
     ("Settings",
      "How much it is allowed to do, and how often.",
      ["config"]),

@@ -375,7 +375,8 @@ class Planner:
                 "warn",
                 f"The model referred to {', '.join(sorted(invented))}, which "
                 f"{'is' if len(invented) == 1 else 'are'} not in the catalogue. "
-                "Not shown, because Lares did not check for them.",
+                f"Not shown, because Lares did not check for "
+                f"{'it' if len(invented) == 1 else 'them'}.",
             ))
 
         actions: list[PlannedAction] = []

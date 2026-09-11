@@ -581,6 +581,12 @@ def cmd_consult(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def cmd_demo(args: argparse.Namespace, console: Console) -> int:
+    """Show the whole loop, with the real artefacts at every step."""
+    from . import demo as demo_mod
+    return demo_mod.run(args, console, loader.load())
+
+
 def cmd_doctor(args: argparse.Namespace, console: Console) -> int:
     """Report what this machine can run, and what it cannot."""
     console.rule("Preflight")
@@ -832,6 +838,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true",
                    help="act on what it decided, rather than only showing it")
     p.set_defaults(func=cmd_consult)
+
+    p = sub.add_parser("demo",
+                       help="a narrated walkthrough: prompt, reply, guard, script, apply")
+    p.add_argument("--recorded", action="store_true",
+                   help="use the recorded model reply even if a model is loaded")
+    p.set_defaults(func=cmd_demo)
 
     p = sub.add_parser("doctor", help="check what this machine can run")
     p.add_argument("-v", "--verbose", action="store_true",
