@@ -287,3 +287,45 @@ def test_resolve_order_moves_dependencies_earlier(catalog):
 
 def test_resolve_order_drops_unknown_and_duplicate_ids(catalog):
     assert catalog.resolve_order(["NOPE-999", "NET-005", "NET-005"]) == ["NET-005"]
+
+
+# --------------------------------------------------------------------------
+# Severity ordering
+#
+# Severity subclasses str so it serialises cleanly, which means it inherits
+# str's comparison operators. That once made max() return the alphabetically
+# largest name rather than the worst finding, and every report said so.
+# --------------------------------------------------------------------------
+
+ASCENDING = [Severity.INFO, Severity.LOW, Severity.MEDIUM,
+             Severity.HIGH, Severity.CRITICAL]
+
+
+@pytest.mark.parametrize("lower,higher", list(zip(ASCENDING, ASCENDING[1:])))
+def test_severity_compares_by_rank_not_alphabetically(lower, higher):
+    assert lower < higher
+    assert higher > lower
+    assert lower <= higher
+    assert higher >= lower
+    assert not (higher < lower)
+    assert not (lower > higher)
+
+
+def test_max_severity_picks_the_worst():
+    # "high" sorts before "medium" alphabetically, which is exactly the pair
+    # that hid this bug.
+    assert max([Severity.MEDIUM, Severity.HIGH], key=lambda s: s.rank) is Severity.HIGH
+    assert max([Severity.MEDIUM, Severity.HIGH]) is Severity.HIGH
+    assert max(ASCENDING) is Severity.CRITICAL
+    assert min(ASCENDING) is Severity.INFO
+
+
+def test_scan_worst_reports_the_worst_finding():
+    from lares.core import Finding, Scan
+    scan = Scan(findings=[
+        Finding("A-001", "a", Severity.MEDIUM),
+        Finding("B-001", "b", Severity.HIGH),
+        Finding("C-001", "c", Severity.LOW),
+    ])
+    assert scan.worst is Severity.HIGH
+    assert Scan().worst is Severity.INFO

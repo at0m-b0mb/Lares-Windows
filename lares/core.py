@@ -45,10 +45,31 @@ class Severity(str, Enum):
     def rank(self) -> int:
         return _SEVERITY_RANK[self]
 
+    # All four comparisons are defined, and that is not belt-and-braces.
+    # Severity subclasses str so that it serialises cleanly, which means it
+    # inherits str's comparison operators. Overriding only __lt__ leaves `>`
+    # falling through to alphabetical string comparison, where "high" < "medium"
+    # and max() of a set of findings returns the wrong one. That silently
+    # mis-stated the worst finding on a machine in every report.
     def __lt__(self, other: object) -> bool:  # type: ignore[override]
         if not isinstance(other, Severity):
             return NotImplemented
         return self.rank < other.rank
+
+    def __gt__(self, other: object) -> bool:  # type: ignore[override]
+        if not isinstance(other, Severity):
+            return NotImplemented
+        return self.rank > other.rank
+
+    def __le__(self, other: object) -> bool:  # type: ignore[override]
+        if not isinstance(other, Severity):
+            return NotImplemented
+        return self.rank <= other.rank
+
+    def __ge__(self, other: object) -> bool:  # type: ignore[override]
+        if not isinstance(other, Severity):
+            return NotImplemented
+        return self.rank >= other.rank
 
 
 _SEVERITY_RANK = {
@@ -403,7 +424,7 @@ class Scan:
     def worst(self) -> Severity:
         if not self.findings:
             return Severity.INFO
-        return max(f.severity for f in self.findings)
+        return max((f.severity for f in self.findings), key=lambda s: s.rank)
 
 
 # --------------------------------------------------------------------------
@@ -472,4 +493,5 @@ def dedupe(findings: Iterable[Finding]) -> list[Finding]:
 
 
 def severity_of(findings: Sequence[Finding]) -> Severity:
-    return max((f.severity for f in findings), default=Severity.INFO)
+    return max((f.severity for f in findings), key=lambda s: s.rank,
+               default=Severity.INFO)
