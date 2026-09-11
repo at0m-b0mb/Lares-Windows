@@ -69,9 +69,24 @@ def _local_stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+#: Monotonic within this process, and part of every error report filename.
+#: Timestamps alone are not enough to order two reports written moments apart:
+#: Windows' system clock granularity is coarse enough that two calls inside one
+#: test return the *same* microsecond value, and the ordering then falls back to
+#: the random hex in the id - which listed the older report first. A counter
+#: does not depend on how fine the platform's clock happens to be.
+_error_sequence = 0
+_sequence_lock = threading.Lock()
+
+
 def _file_stamp() -> str:
-    """Sortable, microsecond-resolution stamp for error report filenames."""
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    """Sortable stamp plus a sequence number, for error report filenames."""
+    global _error_sequence
+    with _sequence_lock:
+        _error_sequence += 1
+        sequence = _error_sequence
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    return f"{stamp}-{sequence:06d}"
 
 
 def _ensure_dir(path: Path) -> None:

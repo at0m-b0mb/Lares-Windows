@@ -138,6 +138,30 @@ def test_errors_are_listed_newest_first(log):
     assert listed.index(second.error_id) < listed.index(first.error_id)
 
 
+def test_ordering_does_not_depend_on_the_clock_advancing(log, monkeypatch):
+    """Windows' clock granularity is coarse enough that two errors written in
+    the same test can share a timestamp to the microsecond. When that happened
+    the ordering fell back to the random hex in the id, which listed the older
+    report first. Freezing the clock makes that the normal case rather than a
+    platform accident."""
+    monkeypatch.setattr(logs, "_file_stamp",
+                        lambda _frozen=logs._file_stamp: "20260101T000000000000-"
+                        + f"{int(_frozen().rsplit('-', 1)[1]):06d}")
+
+    written = [log.error("act", f"failure {i}", exc=ValueError(str(i))).error_id
+               for i in range(8)]
+    listed = [r.error_id for r in log.errors()]
+
+    assert listed == written[::-1], "newest first, whatever the clock did"
+
+
+def test_many_errors_in_the_same_instant_keep_their_order(log):
+    written = [log.error("act", f"failure {i}", exc=ValueError(str(i))).error_id
+               for i in range(25)]
+    listed = [r.error_id for r in log.errors(limit=25)]
+    assert listed == written[::-1]
+
+
 def test_a_log_directory_that_cannot_be_written_does_not_raise(tmp_path):
     blocked = tmp_path / "blocked"
     blocked.write_text("I am a file, not a directory", encoding="utf-8")
