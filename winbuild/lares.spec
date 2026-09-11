@@ -1,0 +1,128 @@
+# PyInstaller spec for both Lares executables.
+#
+# Builds two programs from one spec so they cannot drift apart:
+#
+#   lares.exe          the terminal application, console subsystem
+#   lares-desktop.exe  the desktop application, windowed subsystem
+#
+# Both are onefile. That is the whole point of shipping a binary here - the
+# person running it should not have to think about Python, pip, a virtual
+# environment, or which of three Pythons on their machine is on PATH.
+#
+# Build it with:
+#
+#   pyinstaller winbuild/lares.spec --noconfirm
+#
+# and note that this must run on Windows. PyInstaller is a bundler, not a
+# cross-compiler: it wraps the interpreter and the extension modules of the
+# machine it runs on, so a Windows binary has to be produced on Windows and an
+# ARM64 binary on an ARM64 Windows machine. The repository builds both in CI
+# for exactly that reason.
+
+import sys
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_submodules
+
+ROOT = Path(SPECPATH).resolve().parent
+
+# The catalogue is data, not code, and the executor can only ever run what is
+# in it - so if these files do not make it into the bundle, the program starts
+# and then refuses to do anything. Worth being explicit about.
+datas = [
+    (str(ROOT / "lares" / "catalog" / "controls"), "lares/catalog/controls"),
+    (str(ROOT / "assets" / "lares.ico"), "assets"),
+]
+
+# llama_cpp ships a native library beside its Python package and loads it by
+# path at import time, so it needs collecting wholesale rather than by module
+# name. It is genuinely optional: on ARM64 there is no wheel for it, and Lares
+# falls back to the built-in planner. Missing here is not an error.
+hiddenimports = ["yaml"]
+binaries = []
+try:
+    import llama_cpp  # noqa: F401
+except ImportError:
+    print("[lares.spec] llama-cpp-python not present; "
+          "building without the model backend (the built-in planner still works)")
+else:
+    from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+
+    hiddenimports += collect_submodules("llama_cpp")
+    binaries += collect_dynamic_libs("llama_cpp")
+    datas += collect_data_files("llama_cpp")
+    print("[lares.spec] bundling llama-cpp-python")
+
+# Trimming what is provably unused keeps the download reasonable on the slow
+# machines this targets. Anything listed here that turns out to be needed will
+# fail loudly at import, not silently at runtime.
+excludes = [
+    "tkinter", "matplotlib", "numpy", "scipy", "pandas", "PIL",
+    "pytest", "setuptools", "pip", "unittest", "pydoc", "doctest",
+    "IPython", "notebook", "sphinx",
+]
+
+block_cipher = None
+
+
+def analysis(entry: str, extra_excludes=()) -> Analysis:
+    return Analysis(
+        [str(ROOT / entry)],
+        pathex=[str(ROOT)],
+        binaries=binaries,
+        datas=datas,
+        hiddenimports=hiddenimports,
+        hookspath=[],
+        runtime_hooks=[],
+        excludes=excludes + list(extra_excludes),
+        win_no_prefer_redirects=False,
+        win_private_assemblies=False,
+        cipher=block_cipher,
+        noarchive=False,
+    )
+
+
+# -- the terminal application ---------------------------------------------
+# Qt is excluded here deliberately. Without it the console build is a fraction
+# of the size, and the terminal application has no business importing a GUI
+# toolkit.
+console_a = analysis("lares.py", extra_excludes=["PyQt6", "PyQt5", "PySide6"])
+console_pyz = PYZ(console_a.pure, console_a.zipped_data, cipher=block_cipher)
+console_exe = EXE(
+    console_pyz,
+    console_a.scripts,
+    console_a.binaries,
+    console_a.zipfiles,
+    console_a.datas,
+    [],
+    name="lares",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    runtime_tmpdir=None,
+    console=True,
+    icon=str(ROOT / "assets" / "lares.ico"),
+    version=str(ROOT / "winbuild" / "version_info.txt"),
+)
+
+# -- the desktop application ----------------------------------------------
+desktop_a = analysis("lares-gui.py")
+desktop_pyz = PYZ(desktop_a.pure, desktop_a.zipped_data, cipher=block_cipher)
+desktop_exe = EXE(
+    desktop_pyz,
+    desktop_a.scripts,
+    desktop_a.binaries,
+    desktop_a.zipfiles,
+    desktop_a.datas,
+    [],
+    name="lares-desktop",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    runtime_tmpdir=None,
+    console=False,
+    icon=str(ROOT / "assets" / "lares.ico"),
+    version=str(ROOT / "winbuild" / "version_info.txt"),
+)

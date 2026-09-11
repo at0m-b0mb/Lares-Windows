@@ -1,0 +1,198 @@
+# Builds the Windows executables and attaches them to a release.
+#
+# This workflow exists because PyInstaller is a bundler, not a cross-compiler.
+# It wraps the interpreter and the compiled extension modules of the machine it
+# runs on, so a Windows x64 binary has to be produced on Windows x64 and an
+# ARM64 one on ARM64 Windows. Nobody can build these on a Mac, which is why they
+# are built here instead.
+#
+# What comes out:
+#
+#   lares-x64.exe               terminal application, ~45 MB, fetches a model when it wants one
+#   lares-desktop-x64.exe       desktop application, ~90 MB
+#   lares-full-x64.exe          terminal application with the 1.5B model inside it, ~1.1 GB
+#   lares-arm64.exe             terminal application for Windows on ARM
+#   lares-desktop-arm64.exe     desktop application for Windows on ARM
+#
+# There is no lares-full-arm64.exe on purpose. llama-cpp-python publishes no
+# ARM64 wheel and building it in CI would need the full MSVC ARM64 C++ toolchain
+# for a payload that could not be loaded without it. On ARM64 the built-in
+# planner is the product, and the application says so rather than pretending.
+
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      embed_model:
+        description: "Also build the large single file with the model inside it"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12"
+  MODEL_REPO: Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF
+  MODEL_FILE: qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
+
+jobs:
+  # ------------------------------------------------------------------------
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -r requirements.txt -r requirements-gui.txt pytest
+      - name: Run the suite on the platform it targets
+        run: python -m pytest tests/ -q
+
+  # ------------------------------------------------------------------------
+  x64:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt -r requirements-gui.txt pyinstaller
+          pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+        shell: pwsh
+
+      - name: Confirm the model backend is really present
+        run: python -c "import llama_cpp; print('llama_cpp', llama_cpp.__version__)"
+
+      - name: Build
+        run: pyinstaller winbuild/lares.spec --noconfirm --distpath dist --workpath build
+
+      - name: Smoke test the built executables
+        shell: pwsh
+        run: |
+          # A binary that cannot load its own catalogue is not worth shipping,
+          # and that is exactly the failure a bad spec produces.
+          ./dist/lares.exe --version
+          ./dist/lares.exe --plain doctor
+          ./dist/lares.exe --plain --demo scan | Select-Object -First 20
+          if (-not (Test-Path ./dist/lares-desktop.exe)) { throw "desktop build missing" }
+
+      - name: Name them for the release
+        shell: pwsh
+        run: |
+          Copy-Item dist/lares.exe dist/lares-x64.exe
+          Copy-Item dist/lares-desktop.exe dist/lares-desktop-x64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lares-x64
+          path: |
+            dist/lares-x64.exe
+            dist/lares-desktop-x64.exe
+
+      # -- the single file with the model inside it -----------------------
+      - name: Fetch the model
+        if: github.event_name == 'push' || inputs.embed_model
+        shell: pwsh
+        run: |
+          $url = "https://huggingface.co/$env:MODEL_REPO/resolve/main/$env:MODEL_FILE"
+          Write-Host "Downloading $url"
+          curl.exe -L --fail --retry 3 -o model.gguf $url
+          "{0:N0} MB" -f ((Get-Item model.gguf).Length / 1MB)
+
+      - name: Embed it
+        if: github.event_name == 'push' || inputs.embed_model
+        shell: pwsh
+        run: |
+          python winbuild/embed_model.py dist/lares.exe model.gguf --output dist/lares-full-x64.exe
+          python winbuild/embed_model.py --check dist/lares-full-x64.exe
+
+      - name: Prove the single file actually works
+        if: github.event_name == 'push' || inputs.embed_model
+        shell: pwsh
+        run: |
+          # Unpacks the model on first run, verifies its hash, and reports it.
+          # If the overlay were wrong this is where it would surface.
+          ./dist/lares-full-x64.exe --plain doctor
+          ./dist/lares-full-x64.exe --plain model
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' || inputs.embed_model
+        with:
+          name: lares-full-x64
+          path: dist/lares-full-x64.exe
+          compression-level: 0     # a Q4 GGUF does not compress; skip the hour
+
+  # ------------------------------------------------------------------------
+  arm64:
+    needs: test
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: arm64
+
+      - name: Install
+        # No llama-cpp-python here: there is no ARM64 wheel, and building it
+        # would need the MSVC ARM64 C++ workload. The built-in planner runs.
+        run: pip install -r requirements.txt -r requirements-gui.txt pyinstaller
+
+      - name: Build
+        run: pyinstaller winbuild/lares.spec --noconfirm --distpath dist --workpath build
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          ./dist/lares.exe --version
+          ./dist/lares.exe --plain doctor
+          ./dist/lares.exe --plain --demo scan | Select-Object -First 20
+
+      - name: Name them for the release
+        shell: pwsh
+        run: |
+          Copy-Item dist/lares.exe dist/lares-arm64.exe
+          Copy-Item dist/lares-desktop.exe dist/lares-desktop-arm64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lares-arm64
+          path: |
+            dist/lares-arm64.exe
+            dist/lares-desktop-arm64.exe
+
+  # ------------------------------------------------------------------------
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [x64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect and checksum
+        run: |
+          mkdir -p release
+          find artifacts -name '*.exe' -exec cp {} release/ \;
+          cd release
+          sha256sum *.exe | tee SHA256SUMS.txt
+          ls -lh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.exe
+            release/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: false

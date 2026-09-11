@@ -36,6 +36,7 @@ from ..sense import scanner
 from ..version import VERSION
 from ..winsys import current_user, is_demo, is_elevated, set_demo
 from .render import Console
+from . import interactive
 
 SEVERITY_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM,
                   Severity.LOW, Severity.INFO]
@@ -767,8 +768,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = sys.argv[1:] if argv is None else argv
     parser = build_parser()
-    args = parser.parse_args(argv)
+
+    # Double-clicked from Explorer: there is no command to parse and no shell to
+    # print usage into. Show the menu instead of exiting 2 into a window that
+    # closes before it can be read.
+    if interactive.should_offer_menu(raw):
+        logs.configure()
+        logs.install_excepthook()
+        console = Console()
+        return interactive.run(console, lambda menu_argv: main(menu_argv))
+
+    args = parser.parse_args(raw)
 
     if args.demo:
         set_demo(True)
@@ -780,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
         echo=getattr(args, "debug", False),
     )
     logs.install_excepthook()
+    logs.record_startup("lares (terminal)")
 
     console = Console(plain=args.plain)
     try:

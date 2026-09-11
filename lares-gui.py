@@ -16,13 +16,19 @@ def main() -> int:
         print("The terminal application needs nothing extra:\n\n    python lares.py run\n")
         return 1
 
-    from lares import config
+    from lares import config, logs
     from lares.gui.main_window import Window
     from lares.version import NAME
     from lares.winsys import set_demo
 
     if "--demo" in sys.argv:
         set_demo(True)
+
+    # A windowed build has no console, so an unhandled exception would otherwise
+    # vanish entirely. This is the only record there is.
+    logs.configure(echo=False)
+    logs.install_excepthook()
+    logs.record_startup("lares (desktop)")
 
     app = QApplication(sys.argv)
     app.setApplicationName(NAME)

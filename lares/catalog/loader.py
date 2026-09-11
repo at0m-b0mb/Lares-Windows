@@ -37,7 +37,26 @@ import yaml
 
 from ..core import Control, ParamSpec, RiskTier, Severity
 
-CONTROLS_DIR = Path(__file__).resolve().parent / "controls"
+def _controls_dir() -> Path:
+    """Where the control YAML lives, in a checkout or inside a frozen build.
+
+    PyInstaller unpacks bundled data under ``sys._MEIPASS``. The relative layout
+    is preserved, so the ordinary path works there too, but being explicit means
+    a packaging mistake shows up as a clear "catalogue directory missing" rather
+    than an empty catalogue that silently does nothing.
+    """
+    beside = Path(__file__).resolve().parent / "controls"
+    if beside.is_dir():
+        return beside
+    bundled = getattr(sys, "_MEIPASS", "")
+    if bundled:
+        packaged = Path(bundled) / "lares" / "catalog" / "controls"
+        if packaged.is_dir():
+            return packaged
+    return beside
+
+
+CONTROLS_DIR = _controls_dir()
 
 #: Parameter types the executor knows how to validate.
 PARAM_TYPES = {"int", "string", "enum", "bool", "path"}

@@ -611,6 +611,69 @@ def configure(*, level: Level = Level.INFO, echo: bool = False,
     return _log
 
 
+def record_startup(application: str) -> dict[str, str]:
+    """Write a full description of this machine at the top of every run.
+
+    When someone reports that Lares did something strange, the first six
+    questions are always the same: which build, which Windows, which
+    architecture, elevated or not, real hardware or a VM, and is the model
+    actually loaded. Answering them from a log the user already has beats
+    another round trip asking.
+
+    This is deliberately more than :func:`_environment` collects for an error
+    report - that one has to be cheap because it runs inside a failure path,
+    whereas this runs once at start-up and can afford to shell out.
+    """
+    log = get()
+    facts: dict[str, str] = dict(_environment())
+    facts["application"] = application
+
+    try:
+        from .preflight import architecture, hypervisor
+        arch = architecture()
+        facts["architecture"] = arch.describe()
+        facts["emulated"] = str(arch.emulated)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from .winsys import current_user, is_demo, is_elevated, os_caption
+        facts["user"] = current_user()
+        facts["elevated"] = str(is_elevated())
+        facts["demo_mode"] = str(is_demo())
+        facts["os"] = os_caption()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from .brain.models import measure
+        hardware = measure()
+        facts["hardware"] = hardware.describe()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from .brain import embedded
+        facts["embedded_model"] = embedded.describe()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # The hypervisor probe shells out to PowerShell, so it is skipped unless we
+    # are actually on Windows and not in demo mode - no point paying for it to
+    # tell us nothing.
+    try:
+        from .winsys import IS_WINDOWS, is_demo as _demo
+        if IS_WINDOWS and not _demo():
+            name = hypervisor()
+            if name:
+                facts["virtual_machine"] = name
+    except Exception:  # noqa: BLE001
+        pass
+
+    log.info("system", f"{application} starting", **facts)
+    return facts
+
+
 def install_excepthook() -> None:
     """Send otherwise-unhandled exceptions to the log before the process dies.
 

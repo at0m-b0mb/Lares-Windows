@@ -237,6 +237,44 @@ class Choice:
         return self.spec is not None
 
 
+def _embedded_spec() -> ModelSpec | None:
+    """A spec for the model inside this executable, unpacking it if needed.
+
+    Returns None when this is not a packaged build, when the build carries no
+    model, or when unpacking failed - all three of which mean "carry on with
+    whatever else is available", never "stop".
+    """
+    from . import embedded
+
+    payload = embedded.present()
+    if payload is None:
+        return None
+
+    path = embedded.ensure()
+    if path is None:
+        return None
+
+    # Prefer the ladder entry with the same filename, so the embedded model
+    # inherits its real context length and thread advice rather than a guess.
+    for spec in LADDER:
+        if spec.filename == payload.name:
+            return spec
+
+    return ModelSpec(
+        key="embedded",
+        name=payload.name.replace(".gguf", ""),
+        repo="",
+        filename=payload.name,
+        size_mb=payload.size_mb,
+        min_ram_gb=2,
+        min_cores=2,
+        context=4096,
+        expect_tps="unknown for this build",
+        sha256=payload.sha256,
+        note="Shipped inside this executable.",
+    )
+
+
 def choose(hardware: Hardware | None = None, prefer: str = "") -> Choice:
     """Pick the best rung this machine can carry.
 
@@ -246,6 +284,19 @@ def choose(hardware: Hardware | None = None, prefer: str = "") -> Choice:
     disk mid-scan is worse than no model at all.
     """
     hardware = hardware or measure()
+
+    # A build that carries its own model uses it, unless a tier was named
+    # explicitly. This is the whole point of the single-file executable: it has
+    # a model, it does not need to ask the internet for one, and it should not
+    # quietly ignore what it is carrying in order to go and download something.
+    if not prefer:
+        carried = _embedded_spec()
+        if carried is not None:
+            return Choice(
+                carried, hardware,
+                f"{carried.name} is embedded in this executable",
+                present=True,
+            )
 
     if prefer:
         spec = BY_KEY.get(prefer.lower())
