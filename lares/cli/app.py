@@ -516,6 +516,71 @@ def cmd_controls(args: argparse.Namespace, console: Console) -> int:
 
 
 # --------------------------------------------------------------------------
+def cmd_consult(args: argparse.Namespace, console: Console) -> int:
+    """Let the model lead: it asks what to look at, then says what to do."""
+    from ..brain.consult import Consultant
+
+    catalog = loader.load()
+    settings = _settings_from(args, console)
+    engine, decision = Engine.autoselect(prefer=settings.model_tier)
+
+    console.rule(f"Lares {VERSION} - consultation")
+    console.field("Machine", current_user())
+    console.field("Elevated", "yes" if is_elevated() else "no")
+    console.field("Model", engine.status if decision.spec else "none")
+    console.blank()
+
+    if not engine.available:
+        console.error("This needs the model, and it is not available.")
+        console.advice(engine.status, indent=2)
+        console.advice(
+            "Download lares-full-x64.exe or lares-full-arm64.exe, which carry "
+            "the model inside them, or run 'lares model --download'.", indent=2)
+        return 1
+
+    console.paragraph(
+        "The model decides what to look at. Every reading it asks for is a "
+        "read-only check from the catalogue, and every fix it chooses goes "
+        "through the same guard as any other plan. Each round is a full "
+        "inference pass, so this takes a few minutes on a slow machine.")
+    console.blank()
+
+    consultant = Consultant(catalog, engine, max_rounds=args.rounds)
+    with console.status("Consulting") as status:
+        result = consultant.run(
+            ceiling=settings.risk_ceiling,
+            elevated=is_elevated(),
+            budget=settings.budget,
+            progress=status,
+        )
+
+    console.section("How it investigated")
+    for round_ in result.rounds:
+        console.bullet(round_.describe())
+        if round_.why:
+            console.detail(round_.why)
+    console.field("Checks run", str(result.probes_run))
+
+    console.blank()
+    console.section("What the model concluded")
+    console.paragraph(result.assessment or "It did not reach a conclusion.")
+
+    _show_plan(console, result.plan, catalog, consultant.planner)
+
+    if args.apply and result.plan.actions:
+        console.blank()
+        console.section("Applying what it decided")
+        agent, _ = build(settings, catalog, listener=_make_listener(console),
+                         with_model=True)
+        cycle = agent.run_cycle()
+        _show_cycle(console, cycle, catalog)
+    elif result.plan.actions:
+        console.blank()
+        console.dim("Nothing was changed. Add --apply to act on this.")
+
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace, console: Console) -> int:
     """Report what this machine can run, and what it cannot."""
     console.rule("Preflight")
@@ -758,6 +823,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("config", help="show or change settings")
     p.add_argument("--set", action="append", metavar="NAME=VALUE")
     p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("consult",
+                       help="let the model lead: it asks what to look at, then decides")
+    common(p)
+    p.add_argument("--rounds", type=int, default=3,
+                   help="how many times it may ask before it must answer (default 3)")
+    p.add_argument("--apply", action="store_true",
+                   help="act on what it decided, rather than only showing it")
+    p.set_defaults(func=cmd_consult)
 
     p = sub.add_parser("doctor", help="check what this machine can run")
     p.add_argument("-v", "--verbose", action="store_true",

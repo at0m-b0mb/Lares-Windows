@@ -86,14 +86,24 @@ def scan(
     catalog: Catalog,
     *,
     domains: list[str] | None = None,
+    only: list[str] | None = None,
     progress: Progress | None = None,
     workers: int = MAX_WORKERS,
 ) -> Scan:
-    """Run every applicable probe and collect what is wrong with the machine."""
+    """Run every applicable probe and collect what is wrong with the machine.
+
+    *only* restricts the pass to named controls. The model-led consultation
+    uses it to run exactly the checks the model asked for and no others, so
+    that what it is shown is what it requested rather than everything.
+    """
     started = time.monotonic()
     result = Scan(demo=is_demo())
 
-    controls = [c for c in catalog if not domains or c.domain in domains]
+    wanted = {c.strip().upper() for c in only} if only else None
+    controls = [
+        c for c in catalog
+        if (not domains or c.domain in domains) and (wanted is None or c.id in wanted)
+    ]
     total = len(controls)
 
     if result.demo:

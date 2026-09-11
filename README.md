@@ -138,6 +138,39 @@ A 1.5B model on a slow CPU will sometimes be wrong. It cannot be wrong in a way
 that matters, because the worst it can do is name a control that exists and
 supply parameters that get rejected.
 
+### Letting the model lead
+
+`lares run` hands the model a finished scan and asks it to choose. `lares
+consult` inverts that: the model is asked what it wants to look at, those
+checks are run, and it is asked again — until it says it has seen enough and
+gives a verdict.
+
+```powershell
+lares consult
+lares consult --apply
+```
+
+```
+round 1: asked for machine facts; the network domain -> 3 problem(s) in 6 check(s)
+round 2: asked for IDN-005, SYS-001 -> 2 problem(s) in 2 check(s)
+round 3: gave its verdict
+```
+
+What it may ask for is bounded, and that is the point rather than a
+limitation. Every reading is a detection probe from the catalogue — written by
+a person, read-only, with no parameters the model supplies. So it directs the
+investigation without being able to invent what the investigation *does*, and
+its verdict goes through exactly the same guard as any other plan.
+
+Each round is a full inference pass, so on four cores this is several minutes
+of thinking. `--rounds` sets the budget; when it runs out the model is told to
+give its verdict on what it has.
+
+There is also `--model-only`, which keeps the ordinary scan but makes the
+model the sole decision-maker: its answer is the whole plan, nothing is
+appended to it, and if it cannot answer then nothing is changed rather than
+the built-in planner quietly deciding instead.
+
 ## Why you can leave it running
 
 You asked for no confirmation dialogs. So the safety is not a prompt — it is that
@@ -281,10 +314,10 @@ a change that needs a restart to reveal its effect.
 
 ## Status, stated plainly
 
-**v0.2.2. The engine is tested; the PowerShell is not.**
+**v0.3.0. The engine is tested; the PowerShell is not.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **364 tests** that run on Windows
+loader, the logging, the theme — is covered by **378 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 What has **not** happened is any of the thirty controls executing against a live
@@ -326,7 +359,7 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-364 tests, none of which need Windows. They cover the guard against injection
+378 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay
