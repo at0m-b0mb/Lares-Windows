@@ -62,6 +62,8 @@ def _settings_from(args: argparse.Namespace,
             setattr(settings, name, value)
     if getattr(args, "dry_run", False):
         settings.dry_run = True
+    if getattr(args, "model_only", False):
+        settings.require_model = True
     if getattr(args, "domain", None):
         settings.domains = list(args.domain)
     for correction in settings.validate():
@@ -78,6 +80,8 @@ def _banner(console: Console, settings: config_mod.Settings, note: str) -> None:
     console.field("Elevated", "yes" if is_elevated() else
                   "no - remediation needing admin will be skipped")
     console.field("Model", note)
+    console.field("Decides", "the model alone" if settings.require_model
+                  else "the model, with the built-in planner as a safety net")
     console.field("Mode", mode)
     if is_demo():
         console.warn("Demo mode: this is synthetic data and nothing will be changed.")
@@ -163,7 +167,8 @@ def cmd_plan(args: argparse.Namespace, console: Console) -> int:
     with console.status("Deciding what to do"):
         planner = Planner(catalog, engine)
         plan = planner.plan(scan, ceiling=settings.risk_ceiling,
-                            elevated=is_elevated(), budget=settings.budget)
+                            elevated=is_elevated(), budget=settings.budget,
+                            require_model=settings.require_model)
 
     _show_plan(console, plan, catalog, planner)
     return 0
@@ -692,6 +697,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="restrict to a catalogue domain (repeatable)")
         p.add_argument("--dry-run", action="store_true",
                        help="decide everything, change nothing")
+        p.add_argument("--model-only", action="store_true",
+                       help="let the model be the only thing that decides; "
+                            "change nothing at all if it cannot answer")
 
     p = sub.add_parser("scan", help="look at the machine and report")
     common(p)

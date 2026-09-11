@@ -33,6 +33,22 @@ class Settings:
     domains: list[str] = field(default_factory=list)
     #: Control ids Lares must never touch on this machine.
     excluded: list[str] = field(default_factory=list)
+    #: Let the model be the only thing that decides.
+    #:
+    #: Off, the built-in planner is a safety net: it runs when the model is
+    #: missing or fails, and it appends any fixable finding the model neither
+    #: chose nor gave a reason for skipping - because a small model that simply
+    #: stops generating must not silently lose a critical fix.
+    #:
+    #: On, the model's answer is the whole plan. Nothing is added to it, and if
+    #: the model cannot answer then nothing is changed at all - Lares scans and
+    #: reports and waits, rather than quietly falling back to a different
+    #: decision-maker than the one that was asked for.
+    #:
+    #: The guard is unaffected either way. The model still cannot name a
+    #: control that does not exist, exceed the risk ceiling, or supply a
+    #: parameter the catalogue did not declare.
+    require_model: bool = False
 
     # -- when it runs ---------------------------------------------------
     interval_minutes: int = 240
@@ -123,6 +139,8 @@ def describe(settings: Settings) -> list[tuple[str, str]]:
         ("Domains", ", ".join(settings.domains) if settings.domains else "all"),
         ("Excluded controls", ", ".join(settings.excluded) or "none"),
         ("Model", settings.model_tier or "chosen from hardware"),
+        ("Decides", "the model alone" if settings.require_model
+                    else "the model, with the built-in planner as a safety net"),
         ("Start with Windows", "yes" if settings.start_on_boot else "no"),
         ("Halt after", f"{settings.breaker_threshold} consecutive bad cycles"),
     ]

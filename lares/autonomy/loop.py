@@ -151,6 +151,7 @@ class Agent:
             elevated=elevated,
             budget=self.settings.budget,
             cycle_id=cycle_id,
+            require_model=self.settings.require_model,
         )
         for note in self.planner.notes:
             self._emit("plan", note.text, "")

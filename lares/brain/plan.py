@@ -148,7 +148,17 @@ class Planner:
         self._exchange: logs.Exchange | None = None
 
     def plan(self, scan: Scan, *, ceiling: RiskTier = RiskTier.CAUTION,
-             elevated: bool = True, budget: int = 8, cycle_id: str = "") -> Plan:
+             elevated: bool = True, budget: int = 8, cycle_id: str = "",
+             require_model: bool = False) -> Plan:
+        """Decide what to do about a scan.
+
+        *require_model* makes the model the only decision-maker. Without it the
+        built-in planner is a safety net - it runs when the model cannot, and
+        it appends fixable findings the model neither chose nor deferred. With
+        it, the model's answer is the whole plan, and a model that cannot
+        answer means nothing is changed rather than something else quietly
+        deciding instead.
+        """
         self.notes = []
         self._exchange = None
         log = logs.get()
@@ -164,6 +174,27 @@ class Planner:
 
         if self.engine is None or not self.engine.available:
             reason = self.engine.status if self.engine else "no model configured"
+            if require_model:
+                # Asked for the model to decide, and it cannot. Substituting a
+                # different decision-maker without saying so would be the one
+                # thing this mode exists to prevent.
+                self.notes.append(PlanNote(
+                    "warn",
+                    f"Nothing was changed: the model is the only permitted "
+                    f"decision-maker here and it is unavailable ({reason})."))
+                log.warn("plan", "Model required but unavailable; changing nothing",
+                         reason=reason, findings=len(scan.findings))
+                return Plan(
+                    actions=[],
+                    summary=(
+                        f"{len(scan.findings)} finding(s) are open, and none were "
+                        "acted on. This machine is configured so that the model "
+                        "decides what to do, and the model could not be reached: "
+                        f"{reason}. Nothing was changed."),
+                    deferred={f.control_id: "the model was unavailable to decide"
+                              for f in scan.findings},
+                    model_name="none available",
+                )
             self.notes.append(PlanNote("info", f"Planned without the model: {reason}."))
             log.info("plan", "Planned without the model", reason=reason,
                      actions=len(fallback.actions))
@@ -171,11 +202,27 @@ class Planner:
 
         raw = self._ask_model(scan, ceiling, elevated, budget, cycle_id)
         if raw is None:
+            if require_model:
+                self._commit_exchange(
+                    accepted=[], rejected={},
+                    note="unusable answer; nothing changed, model required")
+                self.notes.append(PlanNote(
+                    "warn",
+                    "Nothing was changed: the model is the only permitted "
+                    "decision-maker here and its answer could not be used."))
+                return Plan(
+                    actions=[],
+                    summary=("The model did not return a usable answer, and this "
+                             "machine is configured so that only the model decides. "
+                             "Nothing was changed."),
+                    model_name=self.engine.name if self.engine else "",
+                )
             self._commit_exchange(accepted=[], rejected={},
                                   note="unusable answer; built-in planner used")
             return fallback
 
-        plan = self._validate(raw, scan, ceiling, elevated, budget)
+        plan = self._validate(raw, scan, ceiling, elevated, budget,
+                              require_model=require_model)
         self._commit_exchange(
             accepted=[a.control_id for a in plan.actions],
             rejected={k: v for k, v in plan.deferred.items()},
@@ -183,7 +230,7 @@ class Planner:
                     "proposed": len(_as_list(raw.get("actions")))},
         )
 
-        if not plan.actions and fallback.actions:
+        if not plan.actions and fallback.actions and not require_model:
             self.notes.append(PlanNote(
                 "warn",
                 "The model returned no usable actions, so the built-in planner was "
@@ -276,7 +323,7 @@ class Planner:
     # -- validating -----------------------------------------------------
 
     def _validate(self, raw: dict[str, Any], scan: Scan, ceiling: RiskTier,
-                  elevated: bool, budget: int) -> Plan:
+                  elevated: bool, budget: int, require_model: bool = False) -> Plan:
         """Turn the model's answer into a plan we are willing to execute."""
         actionable, blocked = _candidates(scan, self.catalog, ceiling, elevated)
         by_control: dict[str, list[Finding]] = {}
@@ -327,7 +374,17 @@ class Planner:
                 order=_clamp_int(item.get("order"), len(actions) + 1),
             ))
 
-        actions = self._append_forgotten(actions, seen, actionable, deferred, budget)
+        if not require_model:
+            actions = self._append_forgotten(actions, seen, actionable, deferred, budget)
+        elif len(actions) < len(actionable):
+            # The model's answer is the whole plan here, so anything it left out
+            # stays out - but silence is not the same as a decision, and the
+            # operator should be able to see what was dropped without one.
+            chosen = {a.control_id for a in actions}
+            for finding, control in actionable:
+                if control.id not in chosen:
+                    deferred.setdefault(
+                        control.id, "the model did not choose it this cycle")
         actions = actions[:budget]
 
         ordered_ids = self.catalog.resolve_order([a.control_id for a in actions])

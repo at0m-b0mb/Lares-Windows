@@ -182,3 +182,90 @@ def test_without_elevation_nothing_that_needs_admin_is_planned():
 
     for action in plan.actions:
         assert not CATALOG.require(action.control_id).needs_admin
+
+
+# --------------------------------------------------------------------------
+# Letting the model be the only decision-maker
+#
+# Off, the built-in planner is a safety net. On, the model's answer is the
+# whole plan - and if it cannot answer, nothing is changed rather than
+# something else quietly deciding instead.
+# --------------------------------------------------------------------------
+
+class _Unavailable:
+    """An engine that cannot serve a request."""
+    name = "Qwen2.5-Coder 1.5B"
+    available = False
+    status = "not downloaded yet"
+
+
+def test_without_a_model_the_builtin_planner_still_acts():
+    scan = scan_with(finding("NET-005"))
+    planner = Planner(CATALOG, engine=_Unavailable())
+
+    plan = planner.plan(scan, require_model=False)
+
+    assert plan.actions, "the safety net should still harden the machine"
+    assert plan.fallback
+
+
+def test_model_only_changes_nothing_when_the_model_is_unavailable():
+    scan = scan_with(finding("NET-005"), finding("IDN-005"))
+    planner = Planner(CATALOG, engine=_Unavailable())
+
+    plan = planner.plan(scan, require_model=True)
+
+    assert plan.actions == [], "nothing may be applied by a different decider"
+    assert "not downloaded yet" in plan.summary
+    assert set(plan.deferred) == {"NET-005", "IDN-005"}
+    assert any(n.level == "warn" for n in planner.notes)
+
+
+def test_model_only_says_why_rather_than_going_quiet():
+    planner = Planner(CATALOG, engine=_Unavailable())
+    plan = planner.plan(scan_with(finding("NET-005")), require_model=True)
+
+    assert "Nothing was changed" in plan.summary or "none were" in plan.summary
+    assert "model" in plan.summary.lower()
+
+
+def test_model_only_does_not_append_what_the_model_left_out():
+    """The whole point: the plan is the model's answer, not a superset of it."""
+    scan = scan_with(finding("NET-005"), finding("IDN-005"))
+    planner = Planner(CATALOG, engine=None)
+
+    plan = planner._validate(
+        {"summary": "s",
+         "actions": [{"control_id": "NET-005", "rationale": "r", "order": 1}]},
+        scan, RiskTier.CAUTION, True, 8, require_model=True)
+
+    assert [a.control_id for a in plan.actions] == ["NET-005"]
+    assert "IDN-005" in plan.deferred
+    assert "did not choose" in plan.deferred["IDN-005"]
+
+
+def test_the_safety_net_does_append_what_the_model_left_out():
+    scan = scan_with(finding("NET-005"), finding("IDN-005"))
+    planner = Planner(CATALOG, engine=None)
+
+    plan = planner._validate(
+        {"summary": "s",
+         "actions": [{"control_id": "NET-005", "rationale": "r", "order": 1}]},
+        scan, RiskTier.CAUTION, True, 8, require_model=False)
+
+    assert {"NET-005", "IDN-005"} <= {a.control_id for a in plan.actions}
+
+
+def test_model_only_does_not_weaken_the_guard():
+    """Sole decision-maker is not the same as unchecked."""
+    scan = scan_with(finding("IDN-008"))          # intrusive, report-only
+    planner = Planner(CATALOG, engine=None)
+
+    plan = planner._validate(
+        {"summary": "s",
+         "actions": [{"control_id": "IDN-008", "rationale": "r", "order": 1},
+                     {"control_id": "XXX-999", "rationale": "r", "order": 2}]},
+        scan, RiskTier.CAUTION, True, 8, require_model=True)
+
+    assert plan.actions == []
+    assert "IDN-008" in plan.deferred
