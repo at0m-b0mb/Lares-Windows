@@ -43,9 +43,11 @@ binaries = []
 try:
     import llama_cpp  # noqa: F401
 except ImportError:
+    _HAS_BACKEND = False
     print("[lares.spec] llama-cpp-python not present; "
           "building without the model backend (the built-in planner still works)")
 else:
+    _HAS_BACKEND = True
     from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
     hiddenimports += collect_submodules("llama_cpp")
@@ -66,17 +68,32 @@ else:
         if candidate.suffix.lower() in (".dll", ".so", ".dylib"):
             binaries.append((str(candidate), "llama_cpp/lib"))
 
+    # llama_cpp imports numpy at module scope, so it has to come along.
+    hiddenimports += ["numpy"]
+
     print(f"[lares.spec] bundling llama-cpp-python "
-          f"({len(binaries)} native libraries)")
+          f"({len(binaries)} native libraries) and numpy")
 
 # Trimming what is provably unused keeps the download reasonable on the slow
-# machines this targets. Anything listed here that turns out to be needed will
-# fail loudly at import, not silently at runtime.
+# machines this targets.
+#
+# numpy is the cautionary tale and is deliberately not in this list when the
+# backend is bundled. It was, on the reasoning that Lares itself never imports
+# it - which is true, and irrelevant, because llama_cpp does. The result was a
+# 1.1 GB executable that carried the model and the backend and then failed to
+# load it with ModuleNotFoundError, falling back to the built-in planner while
+# reporting the backend as present. Excluding a package your dependency needs
+# does not fail loudly at build time; it fails quietly on a user's machine.
 excludes = [
-    "tkinter", "matplotlib", "numpy", "scipy", "pandas", "PIL",
+    "tkinter", "matplotlib", "scipy", "pandas", "PIL",
     "pytest", "setuptools", "pip", "unittest", "pydoc", "doctest",
     "IPython", "notebook", "sphinx",
 ]
+
+if not _HAS_BACKEND:
+    # Nothing else here needs numpy, so it only earns its place alongside
+    # llama_cpp.
+    excludes.append("numpy")
 
 block_cipher = None
 
