@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lares"
+version = "0.1.0"
+description = "An autonomous Windows hardening agent with a local language model."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "at0m-b0mb" }]
+keywords = ["windows", "hardening", "security", "blue-team", "llm", "cis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Colour in the terminal. Deliberately optional: the terminal application
+# degrades to plain print, because a bare Python install is exactly the
+# situation this tool exists for.
+cli = ["rich>=13.0"]
+gui = ["PyQt6>=6.6"]
+# The embedded model. Without it the built-in planner runs instead.
+model = ["llama-cpp-python>=0.3.0"]
+dev = ["pytest>=8.0", "Pillow>=10.0", "PyQt6>=6.6", "rich>=13.0"]
+
+[project.scripts]
+lares = "lares.cli.app:main"
+
+[project.urls]
+Homepage = "https://github.com/at0m-b0mb/Lares-Windows"
+Issues = "https://github.com/at0m-b0mb/Lares-Windows/issues"
+
+[tool.setuptools.packages.find]
+include = ["lares*"]
+
+[tool.setuptools.package-data]
+# The catalogue is data the application cannot start without.
+lares = ["catalog/controls/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:lares.*"]

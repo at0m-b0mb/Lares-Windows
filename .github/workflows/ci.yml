@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the target. Ubuntu is where it gets developed, and it runs
+        # everything in demo mode, so a regression in the engine shows up on
+        # both - a break that only appears on one is worth knowing about.
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Qt needs a display library even to run offscreen
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          LARES_DEMO: "1"
+        run: python -m pytest tests/ -q
+
+  catalogue:
+    name: Catalogue is fit to execute from
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install PyYAML
+
+      # The catalogue is the trust boundary. If it does not load, nothing else
+      # matters, so it is checked on its own rather than only inside the suite.
+      - name: Load and report
+        run: |
+          python - <<'PY'
+          from lares.catalog import loader
+          catalog = loader.load()
+          auto = [c for c in catalog if c.autonomy_eligible]
+          print(f"{len(catalog)} controls, {len(auto)} autonomy-eligible")
+          print(f"digest {catalog.digest}")
+          for control in catalog:
+              how = ("automatic" if control.autonomy_eligible
+                     else "report only" if not control.has_remediation
+                     else "needs a person")
+              print(f"  {control.id}  {control.severity.value:<8} "
+                    f"{control.risk.value:<10} {how:<14} {control.title}")
+          PY
+
+      - name: Every autonomous control must be reversible
+        run: |
+          python - <<'PY'
+          import sys
+          from lares.catalog import loader
+          from lares.act.guard import screen_script
+          failures = []
+          for control in loader.load():
+              if control.autonomy_eligible and not control.is_reversible:
+                  failures.append(f"{control.id} runs unattended but cannot be undone")
+              if control.remediate and not screen_script(control.remediate).ok:
+                  failures.append(f"{control.id} remediation trips its own guard")
+              if control.rollback and not screen_script(control.rollback,
+                                                       absolute_only=True).ok:
+                  failures.append(f"{control.id} rollback trips its own guard")
+          for line in failures:
+              print(f"FAIL {line}")
+          sys.exit(1 if failures else 0)
+          PY
+
+  screenshots:
+    name: Desktop application renders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-cursor0
+          pip install -r requirements-dev.txt
+
+      # Rendering every page in both themes catches the class of break a unit
+      # test does not: a widget that raises on construction, a layout that
+      # cannot resolve, a missing token.
+      - name: Render every page in both themes
+        run: python tools/capture.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: assets/screenshots/
+
+  training:
+    name: Training set builds from the catalogue
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install PyYAML
+
+      - name: Build a small set and score the reference answers
+        run: |
+          python training/build_dataset.py --count 200
+          python training/evaluate.py --baseline
+
+      # The judge scores the reference answers. If it ever returns less than
+      # 100% on them, the judge is broken and no model score means anything.
+      - name: The judge must not flatter or penalise the reference
+        run: |
+          python - <<'PY'
+          import subprocess, sys
+          out = subprocess.run([sys.executable, "training/evaluate.py", "--baseline"],
+                               capture_output=True, text=True).stdout
+          print(out)
+          for measure in ("parseable", "real", "accepted", "faithful", "coverage"):
+              line = next((l for l in out.splitlines() if measure in l), "")
+              if "100.0%" not in line:
+                  print(f"FAIL the judge scores the reference below 100% on {measure}")
+                  sys.exit(1)
+          if "restraint         0" not in out:
+              print("FAIL the reference plan violates restraint")
+              sys.exit(1)
+          print("The judge is sane.")
+          PY

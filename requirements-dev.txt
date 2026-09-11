@@ -1,0 +1,3 @@
+-r requirements-gui.txt
+pytest>=8.0
+Pillow>=10.0      # tools/make_banner.py

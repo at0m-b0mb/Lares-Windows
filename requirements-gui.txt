@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# The desktop application. PyQt6 rather than PySide6, matching the other
+# desktop tools in this catalogue.
+PyQt6>=6.6

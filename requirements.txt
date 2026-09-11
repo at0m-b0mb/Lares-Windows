@@ -1,0 +1,11 @@
+# The terminal application needs one thing to read the catalogue.
+PyYAML>=6.0
+
+# Colour and alignment in the terminal. Optional: lares.py falls back to plain
+# print when it is absent, because a machine with a bare Python install is
+# exactly the machine that most needs hardening.
+rich>=13.0
+
+# The embedded model. Optional: without it the built-in planner runs and the
+# machine still gets hardened, it just gets explained less well.
+# llama-cpp-python>=0.3.0
