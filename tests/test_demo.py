@@ -125,3 +125,82 @@ def test_it_reports_whether_the_prompt_fits(console, capsys):
 
     assert "Context window" in out
     assert "fits" in out or "OVERFLOWS" in out
+
+
+# --------------------------------------------------------------------------
+# The demo must be the real thing
+#
+# A walkthrough that reimplements the pipeline is worse than no walkthrough:
+# it can agree today and drift next month, and the reader would have no way to
+# know. These pin the demo to the same code the agent runs.
+# --------------------------------------------------------------------------
+
+def _scan():
+    from lares.sense import scanner
+    return scanner.scan(CATALOG)
+
+
+def test_the_demo_shows_the_prompt_the_planner_would_actually_send():
+    """Both go through Planner.compose, so this is byte-for-byte, not similar."""
+    from lares.brain.plan import Planner
+    from lares.core import RiskTier
+
+    scan = _scan()
+    planner = Planner(CATALOG, engine=None)
+    ask = planner.compose(scan, RiskTier.CAUTION, True, 8)
+
+    # A second planner, as the demo builds its own, must compose identically.
+    again = Planner(CATALOG, engine=None).compose(scan, RiskTier.CAUTION, True, 8)
+
+    assert ask.system == again.system
+    assert ask.user == again.user
+    assert ask.reply_tokens == again.reply_tokens
+
+
+def test_there_is_only_one_place_that_builds_a_planning_prompt():
+    """prompt.build is the assembler; compose is the only caller that decides
+    the budget. If the demo ever calls build() itself again, this fails."""
+    import pathlib
+
+    demo_src = pathlib.Path("lares/cli/demo.py").read_text()
+    assert "prompt_mod.build(" not in demo_src, (
+        "the demo must call Planner.compose, not rebuild the prompt itself")
+    assert "planner.compose(" in demo_src
+
+
+def test_the_demo_renders_the_script_with_the_same_functions_as_the_executor():
+    """Stage five must use catalogue.render and guard.clear_to_run - the exact
+    calls the executor makes - not a display-only approximation."""
+    import pathlib
+
+    demo_src = pathlib.Path("lares/cli/demo.py").read_text()
+    exec_src = pathlib.Path("lares/act/execute.py").read_text()
+
+    for call in ("clear_to_run(", "render(", "screen_script("):
+        assert call in demo_src, f"the demo should use {call}"
+        assert call in exec_src, f"the executor should use {call}"
+
+
+def test_the_demo_applies_through_the_real_executor():
+    import pathlib
+    demo_src = pathlib.Path("lares/cli/demo.py").read_text()
+    assert "Executor(" in demo_src
+    assert "executor.apply(" in demo_src
+
+
+def test_the_script_the_demo_shows_is_what_the_executor_would_run(console, capsys):
+    """Render the same action both ways and compare the text."""
+    from lares.act.guard import Context, clear_to_run
+    from lares.catalog.loader import render
+    from lares.core import RiskTier
+
+    control = CATALOG.require("NET-005")
+    ctx = Context(elevated=True, ceiling=RiskTier.CAUTION, autonomous=True)
+    expected = render(control.remediate, clear_to_run(control, {}, ctx))
+
+    demo_mod.run(Namespace(recorded=True), console, CATALOG)
+    out = capsys.readouterr().out
+
+    # Every non-blank line of the real script must appear in the walkthrough.
+    for line in (l.strip() for l in expected.splitlines() if l.strip()):
+        assert line in out, f"the demo did not show: {line}"

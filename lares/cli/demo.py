@@ -30,11 +30,9 @@ import json
 from .. import logs
 from ..act.execute import Executor
 from ..act.guard import Context, Refused, clear_to_run, screen_script
-from ..brain import engine as engine_mod
 from ..brain import prompt as prompt_mod
 from ..brain.engine import Engine, extract_json
 from ..brain.plan import Planner
-from ..brain.retrieve import Index, context_for
 from ..catalog.loader import render
 from ..core import RiskTier, Status
 from ..sense import scanner
@@ -113,16 +111,12 @@ def run(args, console: Console, catalog) -> int:
     _heading(console, 2, "What it asks the model")
 
     engine, decision = Engine.autoselect()
-    window = engine.spec.context if engine.spec else 4096
-    index = Index.build(catalog)
-    queries = [f.observed or f.title for f in scan.by_severity()[:prompt_mod.MAX_FINDINGS]]
-    must = {f.control_id for f in scan.findings}
-    context = context_for(index, queries, must, limit=min(12, len(must) + 3))
+    planner = Planner(catalog, engine)
 
-    char_budget = prompt_mod.budget_for(window, engine_mod.PLAN_TOKENS,
-                                        prompt_mod.SYSTEM)
-    user = prompt_mod.build(scan, context, "caution", is_elevated(), 8,
-                            char_budget=char_budget)
+    # The same call the planner makes on the way to the engine. Not a
+    # reconstruction of it - there is one compose() and this is it, so what is
+    # printed below is what would be sent.
+    ask = planner.compose(scan, RiskTier.CAUTION, is_elevated(), 8)
 
     console.paragraph(
         "The model is not asked to remember Windows security. The facts come "
@@ -130,27 +124,25 @@ def run(args, console: Console, catalog) -> int:
         "rather than recall - which is what small models are actually good at.")
     console.blank()
 
-    system_tokens = prompt_mod.estimate_tokens(prompt_mod.SYSTEM)
-    user_tokens = prompt_mod.estimate_tokens(user)
-    reply_room = prompt_mod.answer_room(window, engine_mod.PLAN_TOKENS)
     console.field("Model", engine.name)
-    console.field("Context window", f"{window} tokens")
-    console.field("System prompt", f"{system_tokens} tokens")
-    console.field("This machine's data", f"{user_tokens} tokens")
-    console.field("Reserved for the reply", f"{reply_room} tokens")
-    total = system_tokens + user_tokens + reply_room
-    console.field("Total", f"{total} of {window} tokens "
-                           f"({'fits' if total <= window else 'OVERFLOWS'})")
+    console.field("Context window", f"{ask.window} tokens")
+    console.field("System prompt",
+                  f"{prompt_mod.estimate_tokens(ask.system)} tokens")
+    console.field("This machine's data",
+                  f"{prompt_mod.estimate_tokens(ask.user)} tokens")
+    console.field("Reserved for the reply", f"{ask.reply_tokens} tokens")
+    console.field("Total", f"{ask.total_tokens} of {ask.window} tokens "
+                           f"({'fits' if ask.fits else 'OVERFLOWS'})")
     console.detail("An oversized prompt is not refused - its front is dropped, "
                    "and the front is where the rules are.")
 
     console.blank()
     console.section("The rules it is given")
-    _block(console, prompt_mod.SYSTEM, limit=1400)
+    _block(console, ask.system, limit=1400)
 
     console.blank()
     console.section("What it is told about this machine")
-    _block(console, user, limit=2200)
+    _block(console, ask.user, limit=2200)
 
     # -- 3 ---------------------------------------------------------------
     _heading(console, 3, "What the model answers")
@@ -159,9 +151,9 @@ def run(args, console: Console, catalog) -> int:
         console.paragraph(f"Asking {engine.name}. On a slow CPU this takes a "
                           "minute or two.")
         with console.status("Thinking"):
-            reply = engine.ask(prompt_mod.SYSTEM, user,
+            reply = engine.ask(ask.system, ask.user,
                                schema=prompt_mod.PLAN_SCHEMA,
-                               max_tokens=reply_room)
+                               max_tokens=ask.reply_tokens)
         if reply.ok:
             raw_text = reply.text
             console.blank()
@@ -198,7 +190,6 @@ def run(args, console: Console, catalog) -> int:
         console.error("The reply was not usable JSON, so nothing would run.")
         return 1
 
-    planner = Planner(catalog, engine)
     plan = planner._validate(parsed, scan, RiskTier.CAUTION, is_elevated(), 8)
 
     console.blank()

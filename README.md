@@ -197,6 +197,13 @@ recorded reply from Qwen2.5-Coder 1.5B, kept verbatim **including the control
 id it invented**, because a demonstration where the model never errs teaches
 the wrong lesson about what stage four is for.
 
+The demo is not a second implementation. It calls `Planner.compose` for the
+prompt, `guard.clear_to_run` and `catalogue.render` for the script, and the
+real `Executor` to apply it — the same functions `lares run` calls, and the
+test suite asserts it keeps doing so. A walkthrough that reimplemented the
+pipeline would be worse than none: it could agree today and drift next month,
+and you would have no way to tell.
+
 ## Why you can leave it running
 
 You asked for no confirmation dialogs. So the safety is not a prompt — it is that
@@ -340,10 +347,10 @@ a change that needs a restart to reveal its effect.
 
 ## Status, stated plainly
 
-**v0.4.0. The engine is tested; the PowerShell is not.**
+**v0.4.1. The engine is tested; the PowerShell is not.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **434 tests** that run on Windows
+loader, the logging, the theme — is covered by **439 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 What has **not** happened is any of the thirty controls executing against a live
@@ -385,7 +392,7 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-434 tests, none of which need Windows. They cover the guard against injection
+439 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay

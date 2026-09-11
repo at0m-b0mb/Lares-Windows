@@ -37,6 +37,39 @@ from .engine import Engine, extract_json
 from .retrieve import Index, context_for
 
 
+@dataclass(frozen=True)
+class Ask:
+    """Exactly what will be put to the model, and the room it has to answer.
+
+    This exists so there is one place that composes a planning prompt. The
+    demonstration in ``cli/demo.py`` shows the operator what gets sent, and it
+    can only honestly claim that if it is looking at the same object the
+    planner hands to the engine - not at a second implementation that agrees
+    today and drifts next month.
+    """
+
+    system: str
+    user: str
+    #: The model's context window, and what is reserved inside it for the reply.
+    window: int
+    reply_tokens: int
+    #: The retrieved catalogue text, kept separately for display.
+    context: str
+
+    @property
+    def prompt_tokens(self) -> int:
+        return (prompt_mod.estimate_tokens(self.system)
+                + prompt_mod.estimate_tokens(self.user))
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.reply_tokens
+
+    @property
+    def fits(self) -> bool:
+        return self.total_tokens <= self.window
+
+
 @dataclass
 class PlanNote:
     """Something worth telling the operator about how the plan was made."""
@@ -267,39 +300,57 @@ class Planner:
 
     # -- calling --------------------------------------------------------
 
-    def _ask_model(self, scan: Scan, ceiling: RiskTier, elevated: bool,
-                   budget: int, cycle_id: str = "") -> dict[str, Any] | None:
-        queries = [f.observed or f.title for f in scan.by_severity()[:prompt_mod.MAX_FINDINGS]]
-        must = {f.control_id for f in scan.findings}
-        context = context_for(self.index, queries, must, limit=min(12, len(must) + 3))
+    def compose(self, scan: Scan, ceiling: RiskTier, elevated: bool,
+                budget: int) -> Ask:
+        """Build the planning prompt. The only place that does.
 
-        # Size the message against the window this model actually opened, not
-        # against a hope. PLAN_TOKENS is reserved for the answer; without that
-        # reservation a prompt that "fits" leaves no room to reply in.
-        window = self.engine.spec.context if (self.engine and self.engine.spec) else 4096
+        Sized against the window this model actually opened rather than a
+        hope, with the reply's room reserved first - without that reservation
+        a prompt that "fits" leaves nowhere to answer.
+        """
+        queries = [f.observed or f.title
+                   for f in scan.by_severity()[:prompt_mod.MAX_FINDINGS]]
+        must = {f.control_id for f in scan.findings}
+        context = context_for(self.index, queries, must,
+                              limit=min(12, len(must) + 3))
+
+        spec = getattr(self.engine, "spec", None) if self.engine else None
+        window = spec.context if spec is not None else 4096
         char_budget = prompt_mod.budget_for(window, engine_mod.PLAN_TOKENS,
                                             prompt_mod.SYSTEM)
         user = prompt_mod.build(scan, context, ceiling.value, elevated, budget,
                                 char_budget=char_budget)
+
+        return Ask(
+            system=prompt_mod.SYSTEM,
+            user=user,
+            window=window,
+            reply_tokens=prompt_mod.answer_room(window, engine_mod.PLAN_TOKENS),
+            context=context,
+        )
+
+    def _ask_model(self, scan: Scan, ceiling: RiskTier, elevated: bool,
+                   budget: int, cycle_id: str = "") -> dict[str, Any] | None:
+        ask = self.compose(scan, ceiling, elevated, budget)
+        user = ask.user
         log = logs.get()
 
-        estimated = prompt_mod.estimate_tokens(prompt_mod.SYSTEM) + \
-            prompt_mod.estimate_tokens(user)
-        if estimated + engine_mod.PLAN_TOKENS > window:
+        if not ask.fits:
             # Should not happen now that build() trims, so say so loudly rather
             # than letting the window silently eat the rules at the front.
             log.warn("model", "The planning prompt may not fit the context window",
-                     estimated=estimated, window=window,
-                     reserved=engine_mod.PLAN_TOKENS)
+                     estimated=ask.prompt_tokens, window=ask.window,
+                     reserved=ask.reply_tokens)
         else:
             log.debug("model", "Planning prompt sized",
-                      estimated=estimated, window=window)
+                      estimated=ask.prompt_tokens, window=ask.window)
         log.debug("model", "Asking the model to plan",
-                  findings=len(scan.findings), context=len(context), budget=budget)
+                  findings=len(scan.findings), context=len(ask.context),
+                  budget=budget)
 
         reply = self.engine.ask(  # type: ignore[union-attr]
-            prompt_mod.SYSTEM, user, schema=prompt_mod.PLAN_SCHEMA,
-            max_tokens=prompt_mod.answer_room(window, engine_mod.PLAN_TOKENS),
+            ask.system, ask.user, schema=prompt_mod.PLAN_SCHEMA,
+            max_tokens=ask.reply_tokens,
         )
 
         # Build the transcript entry now, while the prompt and the raw reply are
