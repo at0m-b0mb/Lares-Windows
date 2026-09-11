@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 from ..catalog.loader import Catalog, render
 from ..core import Control, Outcome, PlannedAction, Status
+from .. import demo_data
 from ..winsys import powershell, is_demo
 from . import health as health_mod
 from . import snapshot as snapshot_mod
@@ -57,6 +58,19 @@ class ProbeReading:
         return not self.error
 
 
+def demo_reading(control_id: str) -> ProbeReading:
+    """The probe answer demo mode supplies, in the same shape as a real one."""
+    data = demo_data.probe_for(control_id)
+    instances = data.get("instances")
+    return ProbeReading(
+        compliant=bool(data.get("compliant", False)),
+        observed=str(data.get("observed", "")),
+        evidence=str(data.get("evidence", "")),
+        params=data.get("params") if isinstance(data.get("params"), dict) else None,
+        instances=instances if isinstance(instances, list) else None,
+    )
+
+
 def read_probe(control: Control, params: dict[str, Any] | None = None) -> ProbeReading:
     """Run a control's detection probe and parse its JSON answer.
 
@@ -65,6 +79,9 @@ def read_probe(control: Control, params: dict[str, Any] | None = None) -> ProbeR
     The executor treats an unusable probe as "do not touch this", because a
     change whose effect cannot be measured cannot be verified either.
     """
+    if is_demo():
+        return demo_reading(control.id)
+
     script = control.detect
     if params:
         try:
@@ -136,6 +153,9 @@ class Executor:
     def _run(self, script: str, timeout: int) -> tuple[bool, str]:
         if is_demo():
             return True, "demo mode: not executed"
+        return self._run_live(script, timeout)
+
+    def _run_live(self, script: str, timeout: int) -> tuple[bool, str]:
         result = powershell(script, timeout=timeout)
         output = (result.stdout + ("\n" + result.stderr if result.stderr else "")).strip()
         if not result.ok:
@@ -253,6 +273,8 @@ class Executor:
         self._say(control.id, "apply", control.title)
         ok, output = self._run(rendered, REMEDIATE_TIMEOUT)
         outcome.output = output
+        if ok and is_demo():
+            demo_data.mark_fixed(control.id)
 
         if not ok:
             outcome.status = Status.FAILED
@@ -311,6 +333,8 @@ class Executor:
 
         self._say(control.id, "rollback", why)
         ok, output = self._run(outcome.rollback_script, ROLLBACK_TIMEOUT)
+        if ok and is_demo():
+            demo_data.mark_unfixed(control.id)
         if ok:
             outcome.message += " - rolled back cleanly"
         else:

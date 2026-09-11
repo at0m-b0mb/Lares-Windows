@@ -19,10 +19,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
-from ..act.execute import ProbeReading, read_probe
+from ..act.execute import ProbeReading, demo_reading, read_probe
 from ..catalog.loader import Catalog
 from ..core import Control, Fact, Finding, Scan, Severity, dedupe, utcnow
-from ..demo_data import FACTS as DEMO_FACTS, probe_for
+from ..demo_data import FACTS as DEMO_FACTS
 from ..winsys import is_demo
 from . import facts as facts_mod
 
@@ -31,18 +31,6 @@ from . import facts as facts_mod
 MAX_WORKERS = 4
 
 Progress = Callable[[str, int, int], None]
-
-
-def _demo_reading(control: Control) -> ProbeReading:
-    data = probe_for(control.id)
-    instances = data.get("instances")
-    return ProbeReading(
-        compliant=bool(data.get("compliant", False)),
-        observed=str(data.get("observed", "")),
-        evidence=str(data.get("evidence", "")),
-        params=data.get("params") if isinstance(data.get("params"), dict) else None,
-        instances=instances if isinstance(instances, list) else None,
-    )
 
 
 def findings_from(control: Control, reading: ProbeReading) -> list[Finding]:
@@ -116,7 +104,7 @@ def scan(
         for index, control in enumerate(controls, start=1):
             if progress:
                 progress(control.id, index, total)
-            result.findings.extend(findings_from(control, _demo_reading(control)))
+            result.findings.extend(findings_from(control, demo_reading(control.id)))
     else:
         done = 0
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:

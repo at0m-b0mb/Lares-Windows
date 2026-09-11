@@ -163,7 +163,9 @@
   params:
     - name: previous
       type: enum
-      choices: [Off, Warn, Block, Unset]
+      # "Off" must stay quoted: YAML 1.1 reads a bare Off/On/Yes/No as a boolean,
+      # which would turn this choice into the string "False".
+      choices: ["Off", "Warn", "Block", "Unset"]
       description: The SmartScreen setting found before the change.
   detect: |
     $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer'

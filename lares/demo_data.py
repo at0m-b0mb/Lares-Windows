@@ -280,21 +280,45 @@ PROBES: dict[str, dict[str, Any]] = {
 }
 
 
+# --------------------------------------------------------------------------
+# Mutable demo state
+#
+# Demo mode has to exercise the whole sequence, not just the scan. When the
+# executor "applies" a control here, that control's next probe reports it fixed,
+# so verification, health comparison and the journal all run their real code
+# paths against a machine that visibly changes. Rolling back puts it back.
+# --------------------------------------------------------------------------
+
+_FIXED: set[str] = set()
+
+
+def mark_fixed(control_id: str) -> None:
+    _FIXED.add(control_id)
+
+
+def mark_unfixed(control_id: str) -> None:
+    _FIXED.discard(control_id)
+
+
+def reset_fixed() -> None:
+    _FIXED.clear()
+
+
+def fixed_ids() -> set[str]:
+    return set(_FIXED)
+
+
 def probe_for(control_id: str) -> dict[str, Any]:
     """The demo answer for a control, defaulting to compliant if unlisted.
 
     Defaulting to compliant keeps a newly added control from appearing as a
     fake problem in demo screenshots before anyone has written its demo data.
     """
+    if control_id in _FIXED:
+        base = PROBES.get(control_id, {})
+        observed = str(base.get("observed", control_id))
+        return _probe(True, f"resolved by Lares (was: {observed})")
     return PROBES.get(
         control_id,
         _probe(True, "no demo data for this control; treated as compliant"),
     )
-
-
-#: State after Lares has fixed what it can, so the GUI can show a second pass.
-def probe_after_remediation(control_id: str, fixed: set[str]) -> dict[str, Any]:
-    base = probe_for(control_id)
-    if control_id not in fixed:
-        return base
-    return _probe(True, f"resolved by Lares: {base.get('observed', '')}")

@@ -8,12 +8,18 @@ human, with a rollback beside it.
 Because that is the case, the catalogue is validated hard at load time:
 
 * every control must declare a detection probe;
-* every control with a remediation must also carry a rollback, unless it is
-  explicitly marked ``irreversible: true`` (which bars it from autonomy);
+* every control with a remediation must also carry a rollback, unless it
+  declares ``rollback_policy: additive`` (nothing is replaced, so there is
+  nothing to undo) or ``rollback_policy: irreversible`` (which bars it from
+  ever running autonomously);
 * every ``{placeholder}`` in a script must correspond to a declared parameter,
-  and every declared parameter must be used;
+  and every declared parameter must be used somewhere;
+* string and path parameters must declare a regex, because an unconstrained
+  one is a command-injection slot;
 * parameter specs must be self-consistent (an enum needs choices, a bounded
-  int needs sane bounds).
+  int needs sane bounds);
+* no unrecognised keys, so that a typo in ``rollback`` or ``blast_radius`` is
+  a loud failure rather than a silently dropped safety property.
 
 A catalogue that fails any of these raises at startup rather than at 3am in
 the middle of an unattended remediation.
@@ -23,7 +29,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import string
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
@@ -70,11 +75,27 @@ def _parse_param(raw: dict[str, Any], control_id: str) -> ParamSpec:
     if ptype not in PARAM_TYPES:
         raise CatalogError(f"{control_id}.{name}: unknown parameter type {ptype!r}")
 
-    choices = _as_tuple(raw.get("choices"))
+    raw_choices = raw.get("choices")
+    # YAML 1.1 reads bare Off/On/Yes/No/True/False as booleans, so a choice list
+    # written as [Off, Warn, Block] silently becomes [False, 'Warn', 'Block'] and
+    # then never matches what the probe reports. Catch it here rather than at the
+    # moment a remediation is refused on a live machine.
+    if isinstance(raw_choices, list):
+        for choice in raw_choices:
+            if isinstance(choice, bool):
+                raise CatalogError(
+                    f"{control_id}.{name}: the choice {choice!r} was parsed as a boolean. "
+                    "YAML treats bare Off/On/Yes/No/True/False that way - quote it, "
+                    'as in choices: ["Off", "Warn"].'
+                )
+
+    choices = _as_tuple(raw_choices)
     if ptype == "enum" and not choices:
         raise CatalogError(f"{control_id}.{name}: enum parameter needs a choices list")
     if ptype != "enum" and choices:
         raise CatalogError(f"{control_id}.{name}: choices only apply to enum parameters")
+    if len(set(choices)) != len(choices):
+        raise CatalogError(f"{control_id}.{name}: duplicate values in choices")
 
     minimum = raw.get("min")
     maximum = raw.get("max")
@@ -294,13 +315,24 @@ class Catalog:
     # -- ordering -------------------------------------------------------
 
     def resolve_order(self, control_ids: list[str]) -> list[str]:
-        """Topologically order ids so dependencies are applied first.
+        """Order ids so dependencies come first, otherwise leaving them alone.
 
-        Unknown ids are dropped. Cycles are broken deterministically by id so
-        that a malformed catalogue degrades to a stable order rather than
-        hanging or raising during an unattended run.
+        The caller's order carries real information - the planner has already
+        sorted by severity and by how cheap each fix is to undo - so this is a
+        stable topological sort that only ever moves a control *earlier*, to sit
+        in front of something that depends on it. Sorting by id here instead
+        would silently discard that prioritisation.
+
+        Duplicate and unknown ids are dropped. A dependency cycle is broken at
+        the point it is detected, so a malformed catalogue degrades to a stable
+        order rather than hanging in the middle of an unattended run.
         """
-        wanted = [cid for cid in control_ids if cid in self._controls]
+        wanted: list[str] = []
+        for cid in control_ids:
+            if cid in self._controls and cid not in wanted:
+                wanted.append(cid)
+        position = {cid: i for i, cid in enumerate(wanted)}
+
         seen: set[str] = set()
         out: list[str] = []
 
@@ -310,14 +342,16 @@ class Catalog:
             control = self._controls.get(cid)
             if control is None:
                 return
-            for dep in sorted(control.depends_on):
-                if dep in wanted:
+            # Visit dependencies in the caller's own order, so that two
+            # prerequisites of the same control keep their relative priority.
+            for dep in sorted(control.depends_on, key=lambda d: position.get(d, 0)):
+                if dep in position:
                     visit(dep, stack | {cid})
             if cid not in seen:
                 seen.add(cid)
                 out.append(cid)
 
-        for cid in sorted(wanted):
+        for cid in wanted:
             visit(cid, frozenset())
         return out
 
@@ -377,40 +411,23 @@ def _check_dependencies(controls: dict[str, Control]) -> None:
 # Rendering
 # --------------------------------------------------------------------------
 
-class _StrictFormatter(string.Formatter):
-    """Formatter that refuses anything but plain ``{name}`` substitution.
-
-    ``str.format`` is far too powerful to point at model-influenced data: it
-    can walk attributes and index into objects. This subclass allows only bare
-    field names with no conversion and no format spec, which reduces it to
-    exactly the substitution the catalogue grammar promises.
-    """
-
-    def get_field(self, field_name: str, args, kwargs):  # type: ignore[override]
-        if not field_name.isidentifier():
-            raise CatalogError(f"illegal placeholder {field_name!r} in control script")
-        return kwargs[field_name], field_name
-
-    def convert_field(self, value, conversion):  # type: ignore[override]
-        if conversion is not None:
-            raise CatalogError("conversions are not allowed in control scripts")
-        return value
-
-    def format_field(self, value, format_spec):  # type: ignore[override]
-        if format_spec:
-            raise CatalogError("format specs are not allowed in control scripts")
-        return str(value)
-
-
-_FORMATTER = _StrictFormatter()
-
-
 def render(script: str, params: dict[str, Any]) -> str:
     """Substitute validated parameters into a control script body.
 
+    This deliberately does **not** use ``str.format``. PowerShell uses braces
+    for script blocks and hashtables, so control bodies are full of constructs
+    like ``if ($x -lt 0) { Remove-ItemProperty ... }`` - and Python's format
+    grammar reads every one of those as a replacement field. Beyond breaking on
+    ordinary scripts, ``str.format`` is far too powerful to point at
+    model-influenced data at all: it walks attributes and indexes into objects.
+
+    The substitution is done instead with the same narrow regex that
+    :func:`_placeholders` uses to find them, so a brace pair is only ever
+    touched when it wraps exactly one declared lowercase identifier. Every other
+    brace in the script passes through untouched.
+
     Callers must have run the parameters through ``act.guard.validate_params``
-    first; this function assumes the values are already safe and only handles
-    the substitution itself.
+    first; this function assumes the values are already safe.
     """
     if not script:
         return ""
@@ -418,7 +435,17 @@ def render(script: str, params: dict[str, Any]) -> str:
     missing = needed - set(params)
     if missing:
         raise CatalogError(f"cannot render script, missing parameter(s) {sorted(missing)}")
-    return _FORMATTER.vformat(script, (), {k: params[k] for k in needed})
+
+    def replace(match: "re.Match[str]") -> str:
+        name = match.group(1)
+        if name not in params:
+            # A brace pair shaped like a placeholder that was never declared.
+            # The loader rejects those at startup, so reaching here means the
+            # script did not come from the catalogue.
+            raise CatalogError(f"undeclared placeholder in control script: {name}")
+        return str(params[name])
+
+    return _PLACEHOLDER.sub(replace, script)
 
 
 def with_defaults(control: Control, **overrides: Any) -> Control:
