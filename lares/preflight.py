@@ -32,6 +32,7 @@ import importlib.util
 import platform
 import shutil
 import sys
+from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 
@@ -223,7 +224,12 @@ def check_elevation() -> Check:
 
 def check_powershell() -> Check:
     if not IS_WINDOWS:
-        return Check("PowerShell", State.WARN, "not applicable off Windows")
+        # Not a warning. Off Windows there is nothing to find and nothing to do
+        # about not finding it, and check_platform already carries the notice
+        # that this machine runs in demo mode. A second warning here would
+        # inflate the verdict over a condition that is entirely expected.
+        return Check("PowerShell", State.OK,
+                     "not applicable on this platform; probes run in demo mode")
     found = shutil.which("powershell") or shutil.which("pwsh")
     if not found:
         return Check(
@@ -238,14 +244,34 @@ def check_powershell() -> Check:
 
 
 def check_gui() -> Check:
+    """Whether the desktop application can run.
+
+    In a packaged build this deliberately does not look for the PyQt6 module.
+    The console executable is built with Qt excluded - it has no business
+    carrying a GUI toolkit, and bundling one would double its size - so the
+    module is *expected* to be absent and its absence says nothing about
+    whether the desktop application is available. What matters there is
+    whether lares-desktop.exe is sitting next to it, and telling someone with
+    no Python and no pip to "pip install PyQt6" would be useless advice.
+    """
+    if getattr(sys, "frozen", False):
+        beside = Path(sys.executable).resolve().parent / "lares-desktop.exe"
+        if beside.exists():
+            return Check("Desktop application", State.OK, f"{beside.name} is installed")
+        return Check(
+            "Desktop application", State.WARN,
+            "lares-desktop.exe is not installed beside this one",
+            "The terminal application is complete on its own. To add the desktop "
+            "one, download lares-desktop for your architecture from the releases "
+            "page, or re-run the installer with -Desktop.",
+        )
+
     if _module_present("PyQt6"):
         return Check("Desktop application", State.OK, "PyQt6 is installed")
-    arch = architecture()
     return Check(
         "Desktop application", State.WARN, "PyQt6 is not installed",
         "The terminal application works without it. For the desktop one, run "
-        f"'pip install PyQt6' - wheels are published for {arch.native or 'this'} "
-        "architecture, including ARM64.",
+        "'pip install PyQt6' - wheels are published for x64 and for ARM64.",
     )
 
 
