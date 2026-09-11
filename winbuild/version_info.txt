@@ -10,8 +10,8 @@
 
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 2, 0, 0),
-    prodvers=(0, 2, 0, 0),
+    filevers=(0, 2, 1, 0),
+    prodvers=(0, 2, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -26,12 +26,12 @@ VSVersionInfo(
           '040904B0',
           [StringStruct('CompanyName', 'at0m-b0mb'),
            StringStruct('FileDescription', 'Lares - autonomous Windows hardening agent'),
-           StringStruct('FileVersion', '0.2.0'),
+           StringStruct('FileVersion', '0.2.1'),
            StringStruct('InternalName', 'lares'),
            StringStruct('LegalCopyright', 'MIT licensed. See LICENSE.'),
            StringStruct('OriginalFilename', 'lares.exe'),
            StringStruct('ProductName', 'Lares'),
-           StringStruct('ProductVersion', '0.2.0')]
+           StringStruct('ProductVersion', '0.2.1')]
         )
       ]
     ),

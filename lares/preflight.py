@@ -258,12 +258,17 @@ def check_gui() -> Check:
         beside = Path(sys.executable).resolve().parent / "lares-desktop.exe"
         if beside.exists():
             return Check("Desktop application", State.OK, f"{beside.name} is installed")
+        # Not a warning, and the remedy text said as much while the state
+        # contradicted it. The terminal application is complete on its own, so
+        # a missing desktop companion is a fact about what is installed rather
+        # than a limitation - and grading it as one made a perfectly healthy
+        # machine report "Lares will run, with the limitations noted above".
         return Check(
-            "Desktop application", State.WARN,
-            "lares-desktop.exe is not installed beside this one",
-            "The terminal application is complete on its own. To add the desktop "
-            "one, download lares-desktop for your architecture from the releases "
-            "page, or re-run the installer with -Desktop.",
+            "Desktop application", State.OK,
+            "not installed; the terminal application is complete on its own",
+            "To add the desktop one, download lares-desktop for your "
+            "architecture from the releases page, or re-run the installer "
+            "with -Desktop.",
         )
 
     if _module_present("PyQt6"):

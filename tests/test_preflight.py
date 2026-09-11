@@ -42,10 +42,13 @@ def test_a_packaged_build_looks_for_the_desktop_exe_not_the_module(frozen):
     assert "lares-desktop.exe" in check.detail
 
 
-def test_a_packaged_build_without_the_desktop_exe_says_how_to_get_it(frozen):
+def test_a_missing_desktop_companion_is_not_a_limitation(frozen):
+    """The terminal application is complete on its own, so grading its absence
+    as a warning made a healthy machine report that it would run "with the
+    limitations noted above" - contradicting this check's own remedy text."""
     check = preflight.check_gui()
 
-    assert check.state is State.WARN
+    assert check.state is State.OK
     # Telling someone with no Python and no pip to run pip would be useless.
     assert "pip install" not in check.remedy
     assert "-Desktop" in check.remedy or "releases" in check.remedy
