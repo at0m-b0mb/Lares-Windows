@@ -314,10 +314,10 @@ a change that needs a restart to reveal its effect.
 
 ## Status, stated plainly
 
-**v0.3.0. The engine is tested; the PowerShell is not.**
+**v0.3.1. The engine is tested; the PowerShell is not.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **378 tests** that run on Windows
+loader, the logging, the theme — is covered by **424 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 What has **not** happened is any of the thirty controls executing against a live
@@ -359,7 +359,7 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-378 tests, none of which need Windows. They cover the guard against injection
+424 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay

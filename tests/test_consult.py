@@ -25,6 +25,7 @@ class ScriptedEngine:
     name = "scripted"
     available = True
     status = "ready"
+    spec = None          # a real Engine carries one; None means "assume 4096"
 
     def __init__(self, *answers) -> None:
         self.answers = list(answers)
@@ -198,3 +199,59 @@ def test_every_round_is_described_for_the_operator():
 
     assert "NET-005" in result.rounds[0].describe()
     assert "verdict" in result.rounds[1].describe()
+
+
+# --------------------------------------------------------------------------
+# The transcript must not outgrow the window
+#
+# The consultation accumulates readings every round, so it is the shape most
+# likely to overflow - and it overflows exactly when a verdict is demanded,
+# which is the worst possible moment to lose the rules.
+# --------------------------------------------------------------------------
+
+def test_the_opening_is_never_dropped():
+    """It carries the rules and the list of ids that actually exist."""
+    from lares.brain.consult import _fit
+
+    opening = "RULES: do not invent ids. Controls: NET-001 NET-002"
+    readings = ["reading " + "x" * 500 for _ in range(20)]
+
+    fitted = _fit([opening, *readings], 900)
+
+    assert fitted.startswith(opening)
+    assert "omitted to fit the context window" in fitted
+
+
+def test_the_newest_readings_are_the_ones_kept():
+    from lares.brain.consult import _fit
+
+    parts = ["OPENING", "oldest " + "x" * 200, "middle " + "x" * 200,
+             "newest " + "x" * 200]
+    fitted = _fit(parts, len("OPENING") + 260)
+
+    assert "newest" in fitted
+    assert "oldest" not in fitted
+
+
+def test_a_transcript_that_fits_is_left_alone():
+    from lares.brain.consult import _fit
+
+    parts = ["OPENING", "a reading", "another reading"]
+    assert _fit(parts, 10_000) == "\n\n".join(parts)
+
+
+def test_a_long_consultation_stays_inside_the_window():
+    """Three rounds of a whole domain each, on the smallest window."""
+    from lares.brain import prompt as prompt_mod
+    from lares.brain.consult import ROUND_TOKENS, SYSTEM, _fit
+
+    window = 2048
+    budget = prompt_mod.budget_for(window, ROUND_TOKENS, SYSTEM)
+    reply = prompt_mod.answer_room(window, ROUND_TOKENS)
+
+    parts = ["OPENING " + "x" * 2000] + ["READING " + "y" * 3000 for _ in range(6)]
+    body = _fit(parts, budget)
+
+    needed = (prompt_mod.estimate_tokens(SYSTEM)
+              + prompt_mod.estimate_tokens(body) + reply)
+    assert needed <= window, f"overflows by {needed - window} tokens"

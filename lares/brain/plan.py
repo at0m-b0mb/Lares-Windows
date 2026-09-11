@@ -32,6 +32,7 @@ from .. import logs
 from ..catalog.loader import Catalog
 from ..core import Control, Finding, Plan, PlannedAction, RiskTier, Scan, Severity
 from . import prompt as prompt_mod
+from . import engine as engine_mod
 from .engine import Engine, extract_json
 from .retrieve import Index, context_for
 
@@ -272,13 +273,33 @@ class Planner:
         must = {f.control_id for f in scan.findings}
         context = context_for(self.index, queries, must, limit=min(12, len(must) + 3))
 
-        user = prompt_mod.build(scan, context, ceiling.value, elevated, budget)
+        # Size the message against the window this model actually opened, not
+        # against a hope. PLAN_TOKENS is reserved for the answer; without that
+        # reservation a prompt that "fits" leaves no room to reply in.
+        window = self.engine.spec.context if (self.engine and self.engine.spec) else 4096
+        char_budget = prompt_mod.budget_for(window, engine_mod.PLAN_TOKENS,
+                                            prompt_mod.SYSTEM)
+        user = prompt_mod.build(scan, context, ceiling.value, elevated, budget,
+                                char_budget=char_budget)
         log = logs.get()
+
+        estimated = prompt_mod.estimate_tokens(prompt_mod.SYSTEM) + \
+            prompt_mod.estimate_tokens(user)
+        if estimated + engine_mod.PLAN_TOKENS > window:
+            # Should not happen now that build() trims, so say so loudly rather
+            # than letting the window silently eat the rules at the front.
+            log.warn("model", "The planning prompt may not fit the context window",
+                     estimated=estimated, window=window,
+                     reserved=engine_mod.PLAN_TOKENS)
+        else:
+            log.debug("model", "Planning prompt sized",
+                      estimated=estimated, window=window)
         log.debug("model", "Asking the model to plan",
                   findings=len(scan.findings), context=len(context), budget=budget)
 
         reply = self.engine.ask(  # type: ignore[union-attr]
             prompt_mod.SYSTEM, user, schema=prompt_mod.PLAN_SCHEMA,
+            max_tokens=prompt_mod.answer_room(window, engine_mod.PLAN_TOKENS),
         )
 
         # Build the transcript entry now, while the prompt and the raw reply are

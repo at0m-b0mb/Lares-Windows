@@ -71,7 +71,7 @@ and closing.
 
 ## Known limits, stated plainly
 
-**The engine is tested; the PowerShell is not.** 378 tests run on Windows and
+**The engine is tested; the PowerShell is not.** 424 tests run on Windows and
 Linux across Python 3.10 and 3.12, and CI installs this release with
 `install.ps1` on a clean x64 and a clean ARM64 machine and runs the result. But no control in the catalogue has yet
 executed against a live Windows machine — every probe and remediation was written
