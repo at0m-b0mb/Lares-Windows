@@ -202,3 +202,7 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: false
           body_path: .github/RELEASE_NOTES.md
+          # Without this the action leaves an existing release's body alone,
+          # so a re-run of a tag silently keeps whatever was there before.
+          append_body: false
+          name: Lares ${{ github.ref_name }}
