@@ -276,20 +276,41 @@ def check_gui() -> Check:
 
 
 def check_model_backend() -> Check:
-    """The one check whose answer genuinely differs between x64 and ARM64."""
-    if _module_present("llama_cpp"):
-        return Check("Model backend", State.OK, "llama-cpp-python is installed")
+    """Whether the model backend actually loads.
+
+    This asks the engine rather than looking for the module itself, and the
+    difference is not academic. llama_cpp is pure Python wrapping a native
+    library: a build that carries the Python half without the DLL satisfies
+    any "is the module there" test and then fails on import. That is exactly
+    what happened - doctor reported the backend as installed while the same
+    executable's planner reported it missing, in the same run.
+    """
+    from .brain.engine import _backend_present, backend_error
+
+    if _backend_present():
+        return Check("Model backend", State.OK, "llama-cpp-python is installed and loads")
+
+    detail = backend_error()
+    if getattr(sys, "frozen", False) and detail:
+        return Check(
+            "Model backend", State.WARN,
+            f"the bundled model backend would not load - {detail}",
+            "This build was supposed to carry the backend, so this is a "
+            "packaging fault rather than anything missing on your machine. "
+            "Lares still scans, decides, fixes, verifies and rolls back using "
+            "the built-in planner. Please report the message above.",
+        )
 
     arch = architecture()
     if arch.native == "ARM64" and not arch.emulated:
         return Check(
             "Model backend", State.WARN,
-            "llama-cpp-python is not installed, and no ARM64 wheel is published",
+            "llama-cpp-python is not installed here, and no ARM64 wheel is published",
             "Lares runs fully without it using the built-in planner - it will "
             "scan, decide, fix, verify and roll back exactly the same, it just "
-            "will not narrate its reasoning. To get the model as well, build the "
-            "backend from source: install Visual Studio Build Tools with the "
-            "ARM64 C++ workload and CMake, then 'pip install llama-cpp-python'.",
+            "will not narrate its reasoning. For the model on ARM, download "
+            "lares-full-arm64.exe, which carries a backend compiled with clang "
+            "because llama.cpp refuses to build with MSVC on ARM.",
         )
     return Check(
         "Model backend", State.WARN, "llama-cpp-python is not installed",

@@ -134,6 +134,18 @@ jobs:
           ./dist/lares-full-x64.exe --plain doctor
           ./dist/lares-full-x64.exe --plain model
 
+          # And the part that a passing "doctor" did not previously guarantee:
+          # that the bundled backend actually imports. It is pure Python around
+          # a native library, so the package can be present and still fail to
+          # load, which is how a build once reported the backend installed and
+          # missing in the same run.
+          $report = ./dist/lares-full-x64.exe --plain doctor | Out-String
+          if ($report -notmatch "llama-cpp-python is installed and loads") {
+            Write-Host $report
+            throw "the bundled model backend does not load in the built executable"
+          }
+          Write-Host "the bundled backend loads"
+
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' || inputs.embed_model
         with:
@@ -253,6 +265,13 @@ jobs:
         run: |
           ./dist/lares-full-arm64.exe --plain doctor
           ./dist/lares-full-arm64.exe --plain model
+
+          $report = ./dist/lares-full-arm64.exe --plain doctor | Out-String
+          if ($report -notmatch "llama-cpp-python is installed and loads") {
+            Write-Host $report
+            throw "the bundled ARM64 model backend does not load"
+          }
+          Write-Host "the bundled ARM64 backend loads"
 
       - uses: actions/upload-artifact@v4
         if: env.HAS_BACKEND == 'true'

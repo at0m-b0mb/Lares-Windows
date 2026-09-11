@@ -104,3 +104,63 @@ def test_the_verdict_matches_the_worst_check():
 def test_a_packaged_build_reports_every_check_without_raising(frozen):
     for check in preflight.run():
         assert check.name and check.detail
+
+
+# --------------------------------------------------------------------------
+# The backend check must ask the same question the engine asks
+# --------------------------------------------------------------------------
+
+def test_doctor_and_the_engine_never_disagree(monkeypatch):
+    """Reported from a real machine: doctor said the backend was installed and
+    the planner in the same executable said it was not.
+
+    The cause was doctor checking whether the *module* existed while the engine
+    performed the real *import*. llama_cpp is pure Python wrapping a native
+    library, so a bundle carrying the Python half without the DLL satisfies the
+    first and fails the second.
+    """
+    from lares.brain import engine as engine_mod
+
+    for present, error in ((True, None), (False, "OSError: cannot load library")):
+        monkeypatch.setattr(engine_mod, "_BACKEND_CHECKED", True, raising=False)
+        monkeypatch.setattr(engine_mod, "_BACKEND_ERROR", error, raising=False)
+
+        check = preflight.check_model_backend()
+        assert (check.state is State.OK) == present, (
+            "doctor must report exactly what the engine would find")
+
+
+def test_a_packaged_build_blames_itself_rather_than_the_machine(frozen, monkeypatch):
+    from lares.brain import engine as engine_mod
+    monkeypatch.setattr(engine_mod, "_BACKEND_CHECKED", True, raising=False)
+    monkeypatch.setattr(engine_mod, "_BACKEND_ERROR",
+                        "OSError: [WinError 193] not a valid Win32 application",
+                        raising=False)
+
+    check = preflight.check_model_backend()
+
+    assert check.state is State.WARN
+    assert "would not load" in check.detail
+    assert "WinError 193" in check.detail
+    assert "packaging fault" in check.remedy
+
+
+def test_the_reason_an_import_failed_is_kept_not_swallowed(monkeypatch):
+    """A backend that will not load must say why. Returning a bare False left
+    nothing on screen or on disk to act on."""
+    from lares.brain import engine as engine_mod
+    monkeypatch.setattr(engine_mod, "_BACKEND_CHECKED", False, raising=False)
+    monkeypatch.setattr(engine_mod, "_BACKEND_ERROR", None, raising=False)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def fail(name, *args, **kwargs):
+        if name == "llama_cpp":
+            raise OSError("[WinError 126] The specified module could not be found")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail)
+
+    assert engine_mod._backend_present() is False
+    assert "WinError 126" in engine_mod.backend_error()

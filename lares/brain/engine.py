@@ -17,7 +17,9 @@ there; it just stops being able to explain itself as well.
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -96,6 +98,12 @@ class Engine:
         if not self.spec.path.exists():
             return f"{self.spec.name} is not downloaded yet"
         if not _backend_present():
+            detail = backend_error()
+            if getattr(sys, "frozen", False) and detail:
+                # In a packaged build the library is supposed to be inside the
+                # executable, so "not installed" is misleading - it is there and
+                # it would not load. Say which.
+                return f"the bundled model backend would not load ({detail})"
             return "llama-cpp-python is not installed; using the built-in planner"
         if self._load_error:
             return f"{self.spec.name} failed to load: {self._load_error}"
@@ -215,11 +223,66 @@ class Engine:
 # Helpers
 # --------------------------------------------------------------------------
 
+#: Why the backend could not be imported, kept so it can be reported instead
+#: of swallowed. Computed once: a failed import is not cheap and the answer
+#: does not change within a process.
+_BACKEND_ERROR: str | None = None
+_BACKEND_CHECKED = False
+
+
+def _prepare_frozen_library() -> None:
+    """Point llama_cpp at its native library inside a PyInstaller bundle.
+
+    llama_cpp finds its DLL relative to its own __file__, which works in a
+    normal install and is fragile in a onefile build where the package is
+    unpacked into a temporary directory. It honours an environment variable
+    naming the directory, so when the bundled library is findable we set that
+    before the import rather than hoping the relative path resolves.
+
+    The variable has been spelled two ways across releases, so both are set.
+    """
+    base = getattr(sys, "_MEIPASS", "")
+    if not base:
+        return
+
+    root = Path(base)
+    for candidate in (root / "llama_cpp" / "lib", root / "llama_cpp", root):
+        if not candidate.is_dir():
+            continue
+        if any(candidate.glob("*llama*.dll")) or any(candidate.glob("*llama*.so")):
+            for name in ("LLAMA_CPP_LIB_PATH", "LLAMA_CPP_LIB"):
+                os.environ.setdefault(name, str(candidate))
+            return
+
+
+def backend_error() -> str:
+    """The reason the model backend is unusable, or an empty string."""
+    _backend_present()
+    return _BACKEND_ERROR or ""
+
+
 def _backend_present() -> bool:
+    """Whether llama_cpp can actually be imported - not merely located.
+
+    This deliberately performs the real import. Checking that the module
+    *exists* is a different question from whether it *loads*: the package is
+    pure Python wrapping a native library, so a bundle that carries the Python
+    half without the DLL passes any find_spec check and then fails here. That
+    exact split had `doctor` reporting the backend as installed while the same
+    executable's planner reported it missing.
+    """
+    global _BACKEND_ERROR, _BACKEND_CHECKED
+    if _BACKEND_CHECKED:
+        return _BACKEND_ERROR is None
+
+    _BACKEND_CHECKED = True
+    _prepare_frozen_library()
     try:
         import llama_cpp  # noqa: F401
-    except Exception:  # noqa: BLE001 - a broken install is the same as no install
+    except Exception as exc:  # noqa: BLE001 - a broken install is the same as no install
+        _BACKEND_ERROR = f"{type(exc).__name__}: {exc}"[:300]
         return False
+    _BACKEND_ERROR = None
     return True
 
 

@@ -49,9 +49,25 @@ else:
     from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
     hiddenimports += collect_submodules("llama_cpp")
-    binaries += collect_dynamic_libs("llama_cpp")
     datas += collect_data_files("llama_cpp")
-    print("[lares.spec] bundling llama-cpp-python")
+
+    # collect_dynamic_libs is not enough on its own here. llama_cpp finds its
+    # native library by walking from its own __file__ into lib/, and a onefile
+    # build unpacks into a temporary directory where that relative walk is
+    # fragile - which showed up as doctor reporting the backend present while
+    # the planner in the same executable could not import it. Placing the
+    # libraries explicitly under llama_cpp/lib puts them where the package
+    # actually looks; lares/brain/engine.py also sets the environment variable
+    # that names the directory, so both routes lead to the same place.
+    collected = collect_dynamic_libs("llama_cpp")
+    binaries += collected
+    package_dir = Path(llama_cpp.__file__).resolve().parent
+    for candidate in sorted((package_dir / "lib").glob("*")):
+        if candidate.suffix.lower() in (".dll", ".so", ".dylib"):
+            binaries.append((str(candidate), "llama_cpp/lib"))
+
+    print(f"[lares.spec] bundling llama-cpp-python "
+          f"({len(binaries)} native libraries)")
 
 # Trimming what is provably unused keeps the download reasonable on the slow
 # machines this targets. Anything listed here that turns out to be needed will
