@@ -151,6 +151,19 @@ def _parse_param(raw: dict[str, Any], control_id: str) -> ParamSpec:
     )
 
 
+def _parse_timeout(raw: dict[str, Any], cid: str) -> int:
+    value = raw.get("timeout", 0)
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        raise CatalogError(f"{cid}: timeout must be a whole number of seconds") from None
+    if seconds and not 30 <= seconds <= 3600:
+        raise CatalogError(
+            f"{cid}: timeout {seconds}s is outside 30-3600. Below 30 nothing "
+            "useful finishes; above an hour an unattended cycle is wedged.")
+    return seconds
+
+
 def _placeholders(script: str) -> set[str]:
     """Names used as ``{name}`` in a script body.
 
@@ -168,7 +181,7 @@ CONTROL_KEYS = {
     "id", "title", "domain", "severity", "risk", "rationale", "detect",
     "remediate", "rollback", "rollback_policy", "rollback_note", "params",
     "depends_on", "references", "applies_to", "needs_admin", "blast_radius",
-    "tags", "effective",
+    "tags", "effective", "timeout",
 }
 
 #: When a control's change starts working. See Control.effective.
@@ -276,6 +289,7 @@ def parse_control(raw: dict[str, Any], source: Path) -> Control:
         references=_as_tuple(raw.get("references")),
         applies_to=_as_tuple(raw.get("applies_to")),
         needs_admin=bool(raw.get("needs_admin", True)),
+        timeout=_parse_timeout(raw, cid),
         blast_radius=str(raw.get("blast_radius", "")).strip(),
         tags=_as_tuple(raw.get("tags")),
     )

@@ -261,6 +261,12 @@ class Control:
     applies_to: tuple[str, ...] = ()
     #: When true, applying this needs an elevated process.
     needs_admin: bool = True
+    #: Seconds to allow this control's remediation and rollback. The default
+    #: suits a registry write or a service change. Anything that goes through
+    #: DISM - adding or removing a Windows feature - routinely takes several
+    #: minutes on a virtual machine, and a timeout there is indistinguishable
+    #: from a hang to whoever is watching.
+    timeout: int = 0
     #: Human note on what could go wrong. Surfaced in the journal.
     blast_radius: str = ""
     tags: tuple[str, ...] = ()

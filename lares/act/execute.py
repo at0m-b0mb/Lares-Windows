@@ -270,7 +270,7 @@ class Executor:
 
         # -- apply ---------------------------------------------------------
         self._say(control.id, "apply", control.title)
-        ok, output = self._run(rendered, REMEDIATE_TIMEOUT)
+        ok, output = self._run(rendered, control.timeout or REMEDIATE_TIMEOUT)
         outcome.output = output
         # Set before checking `ok`: a script that failed part way through has
         # still changed something, and that is exactly when the undo matters.
@@ -350,8 +350,12 @@ class Executor:
             outcome.message += " (no rollback script was available)"
             return False
 
+        # A rollback gets at least as long as the remediation did. Undoing a
+        # DISM feature change costs the same minutes as making it, and cutting
+        # the undo short is far worse than cutting the change short.
         self._say(control.id, "rollback", why)
-        ok, output = self._run(outcome.rollback_script, ROLLBACK_TIMEOUT)
+        ok, output = self._run(outcome.rollback_script,
+                               max(control.timeout, ROLLBACK_TIMEOUT))
         if ok and is_demo():
             demo_data.mark_unfixed(control.id)
         if ok:

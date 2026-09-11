@@ -1,6 +1,6 @@
 """Single source of the version number."""
 
-VERSION = "0.1.3"
+VERSION = "0.2.0"
 NAME = "Lares"
 TAGLINE = "An autonomous Windows hardening agent with a local model."
 

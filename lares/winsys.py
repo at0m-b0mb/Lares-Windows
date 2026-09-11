@@ -23,6 +23,7 @@ import ctypes
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -143,9 +144,51 @@ def run(args: list[str], timeout: int = DEFAULT_TIMEOUT, cwd: str | None = None)
     return Result(
         ok=proc.returncode == 0,
         stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
+        stderr=clean_clixml(proc.stderr or ""),
         code=proc.returncode,
     )
+
+
+_CLIXML_PREFIX = "#< CLIXML"
+_CLIXML_STRING = re.compile(r"<S[^>]*>(.*?)</S>", re.DOTALL)
+
+
+def clean_clixml(text: str) -> str:
+    """Turn PowerShell's serialised error stream back into readable text.
+
+    When PowerShell's stderr is captured rather than shown, it does not write
+    plain messages - it writes the error records as CLIXML, so a failure that
+    reads perfectly well in a console arrives here as
+
+        #< CLIXML <Objs Version="1.1.0.1" xmlns="http://schemas...
+
+    and the useful sentence is buried in an <S> element several hundred
+    characters in. Reporting that verbatim to somebody whose remediation just
+    failed is no better than reporting nothing.
+    """
+    if _CLIXML_PREFIX not in text:
+        return text
+
+    body = text.split(_CLIXML_PREFIX, 1)[1]
+    pieces = []
+    for raw in _CLIXML_STRING.findall(body):
+        # CLIXML escapes newlines and tabs as _x000D__x000A_ and friends.
+        piece = re.sub(r"_x([0-9A-Fa-f]{4})_",
+                       lambda m: chr(int(m.group(1), 16)), raw)
+        pieces.append(piece)
+
+    message = " ".join(" ".join(pieces).split())
+    if not message:
+        # Nothing extractable. Say so rather than handing back the raw XML.
+        return "PowerShell reported an error but its detail could not be read"
+    return _unescape(message)
+
+
+def _unescape(text: str) -> str:
+    for entity, char in (("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'),
+                         ("&apos;", "'"), ("&amp;", "&")):
+        text = text.replace(entity, char)
+    return text
 
 
 def _no_window_flags() -> int:

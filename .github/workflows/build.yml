@@ -148,9 +148,33 @@ jobs:
           architecture: arm64
 
       - name: Install
-        # No llama-cpp-python here: there is no ARM64 wheel, and building it
-        # would need the MSVC ARM64 C++ workload. The built-in planner runs.
         run: pip install -r requirements.txt -r requirements-gui.txt pyinstaller
+
+      # llama-cpp-python publishes no ARM64 wheel, so the only way an ARM64
+      # user gets the model is if it is compiled here. The runner image carries
+      # Visual Studio 2022 with Microsoft.VisualStudio.Component.VC.Tools.ARM64
+      # and CMake, which is exactly what that needs.
+      #
+      # It is allowed to fail. A source build of llama.cpp has a great many ways
+      # to go wrong on a platform its authors do not ship binaries for, and the
+      # right outcome then is the slim ARM64 build that already worked rather
+      # than no release at all. Every later step asks whether it succeeded.
+      - name: Try to compile the model backend for ARM64
+        id: backend
+        continue-on-error: true
+        shell: pwsh
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF"
+        run: |
+          pip install --no-binary :all: --verbose llama-cpp-python
+          python -c "import llama_cpp; print('built llama_cpp', llama_cpp.__version__)"
+
+      - name: Say which kind of ARM64 build this is
+        shell: pwsh
+        run: |
+          $built = "${{ steps.backend.outcome }}" -eq "success"
+          Write-Host "model backend compiled: $built"
+          "HAS_BACKEND=$($built.ToString().ToLower())" | Out-File $env:GITHUB_ENV -Append
 
       - name: Build
         run: pyinstaller winbuild/lares.spec --noconfirm --distpath dist --workpath build
@@ -174,6 +198,36 @@ jobs:
           path: |
             dist/lares-arm64.exe
             dist/lares-desktop-arm64.exe
+
+      # -- the single file with the model inside it, for ARM64 ------------
+      - name: Fetch the model
+        if: env.HAS_BACKEND == 'true'
+        shell: pwsh
+        run: |
+          $url = "https://huggingface.co/$env:MODEL_REPO/resolve/main/$env:MODEL_FILE"
+          curl.exe -L --fail --retry 3 -o $env:MODEL_FILE $url
+          "{0:N0} MB" -f ((Get-Item $env:MODEL_FILE).Length / 1MB)
+
+      - name: Embed it
+        if: env.HAS_BACKEND == 'true'
+        shell: pwsh
+        run: |
+          python winbuild/embed_model.py dist/lares.exe $env:MODEL_FILE --output dist/lares-full-arm64.exe
+          python winbuild/embed_model.py --check dist/lares-full-arm64.exe
+
+      - name: Prove the ARM64 single file actually loads its model
+        if: env.HAS_BACKEND == 'true'
+        shell: pwsh
+        run: |
+          ./dist/lares-full-arm64.exe --plain doctor
+          ./dist/lares-full-arm64.exe --plain model
+
+      - uses: actions/upload-artifact@v4
+        if: env.HAS_BACKEND == 'true'
+        with:
+          name: lares-full-arm64
+          path: dist/lares-full-arm64.exe
+          compression-level: 0
 
   # ------------------------------------------------------------------------
   release:

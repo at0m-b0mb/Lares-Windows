@@ -5,6 +5,12 @@
   domain: system
   severity: high
   risk: caution
+  # Adding or removing a Windows feature goes through DISM, which services the
+  # component store and routinely takes several minutes on a virtual machine or
+  # a spinning disk. Measured at over 300s on Windows 11 ARM64 under VMware,
+  # where the default budget expired mid-operation and the undo - another DISM
+  # call - was then cut off even shorter.
+  timeout: 1200
   effective: restart
   tags: [powershell, downgrade, logging-bypass]
   references:
