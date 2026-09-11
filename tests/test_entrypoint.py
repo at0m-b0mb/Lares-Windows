@@ -125,8 +125,32 @@ def test_arguments_mean_no_menu(monkeypatch):
     assert interactive.should_offer_menu(["scan"]) is False
 
 
-def test_a_shell_launch_means_no_menu(monkeypatch):
-    monkeypatch.setattr(interactive, "owns_console_alone", lambda: False)
+def test_a_bare_invocation_with_a_person_there_offers_the_menu(monkeypatch):
+    """Windows Terminal hosts a double-clicked exe through ConPTY and is itself
+    attached to the console, so counting console processes cannot tell a
+    double-click from a shell. Someone typing `lares` with nothing after it
+    wants to know what it does either way."""
+    class Tty:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr("sys.stdin", Tty())
+    monkeypatch.setattr("sys.stdout", Tty())
+    assert interactive.should_offer_menu([]) is True
+
+
+def test_a_redirected_stdout_means_no_menu(monkeypatch):
+    """`lares > out.txt` is somebody capturing output, not reading a menu."""
+    class Tty:
+        def isatty(self):
+            return True
+
+    class Pipe:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr("sys.stdin", Tty())
+    monkeypatch.setattr("sys.stdout", Pipe())
     assert interactive.should_offer_menu([]) is False
 
 

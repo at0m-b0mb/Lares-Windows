@@ -48,7 +48,8 @@ language model inside it, so it works on a machine that has never been online.
 | **`lares-full-x64.exe`** | Terminal application **with the model embedded**. Nothing to fetch, ever. | ~1.1 GB |
 | `lares-x64.exe` | Terminal application. Fetches a model the first time it wants one. | ~45 MB |
 | `lares-desktop-x64.exe` | Desktop application. | ~90 MB |
-| `lares-arm64.exe` · `lares-desktop-arm64.exe` | Windows on ARM. See [below](#will-it-run-on-my-machine). | ~45 / 90 MB |
+| **`lares-full-arm64.exe`** | Windows on ARM, **with the model embedded**. | ~1.1 GB |
+| `lares-arm64.exe` · `lares-desktop-arm64.exe` | Windows on ARM, without the model. | ~12 / 27 MB |
 
 Get them from the [latest release](https://github.com/at0m-b0mb/Lares-Windows/releases/latest).
 Every file is listed in `SHA256SUMS.txt`; check yours before running it.
@@ -242,14 +243,14 @@ about each.
 | Scanner, catalogue, executor, rollback | yes | yes |
 | Terminal application | yes | yes |
 | Desktop application | yes | yes — PyQt6 ships ARM64 wheels |
-| Embedded language model | yes | **no** |
+| Embedded language model | yes | yes, compiled with clang |
 | Built-in planner | yes | yes |
 
-On **Windows 11 ARM64** everything runs natively except the model backend:
-`llama-cpp-python` publishes no ARM64 wheel, so it needs a compiler or it is
-simply left out. The built-in planner is the product there, and the application
-says so rather than pretending. If you want the model too, install Visual Studio
-Build Tools with the ARM64 C++ workload and `pip install llama-cpp-python`.
+On **Windows 11 ARM64** everything runs natively, model included.
+`llama-cpp-python` publishes no ARM64 wheel, so CI compiles one — and llama.cpp
+refuses to build with MSVC on ARM ("use clang"), so the build goes through
+clang-cl. That is why `lares-full-arm64.exe` exists. If the compile ever fails,
+the slim ARM64 build ships instead and `lares doctor` says which one you have.
 
 Windows on ARM will also happily run x64 Python under emulation, which works and
 is slower; `doctor` detects that case with `IsWow64Process2` and reports it

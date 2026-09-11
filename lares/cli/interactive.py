@@ -50,17 +50,33 @@ def owns_console_alone() -> bool:
 
 
 def should_offer_menu(argv: list[str]) -> bool:
-    """Whether to show the menu rather than parse arguments."""
+    """Whether to show the menu rather than parse arguments.
+
+    The test used to require owning the console alone, on the theory that this
+    distinguishes a double-click from a shell. It does not, on Windows 11:
+    when Windows Terminal is the default console host it hosts the process
+    through ConPTY and is itself attached, so the count is two and a
+    double-clicked executable fell through to an argparse usage block - the
+    exact outcome the menu exists to replace.
+
+    So the test is now simply: no command was given, and there is a person
+    there to read the answer. Someone who types `lares` with nothing after it
+    wants to know what it can do, and a numbered list answers that better than
+    a usage line does. Anything non-interactive - a pipe, a redirect, a
+    scheduled task, CI - still gets the ordinary argument parsing, because a
+    menu prompt would hang there forever.
+    """
     if argv:
         return False
-    if not owns_console_alone():
-        return False
-    # Piped or redirected input means something is driving this rather than
-    # somebody sitting at it, and a menu would block forever. A closed or
-    # detached stdin raises here rather than answering, and in a frozen build
-    # that is not rare - so it is treated as "no console to prompt on".
+    # A closed or detached stdin raises rather than answering, and in a frozen
+    # build that is not rare, so it counts as "nobody is there".
     try:
-        return sys.stdin is not None and sys.stdin.isatty()
+        if sys.stdin is None or not sys.stdin.isatty():
+            return False
+    except (ValueError, OSError, AttributeError):
+        return False
+    try:
+        return sys.stdout is not None and sys.stdout.isatty()
     except (ValueError, OSError, AttributeError):
         return False
 
