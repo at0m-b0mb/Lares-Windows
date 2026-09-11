@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .. import logs
 from ..catalog.loader import Catalog
 from ..core import Control, Finding, Plan, PlannedAction, RiskTier, Scan, Severity
 from . import prompt as prompt_mod
@@ -142,10 +143,15 @@ class Planner:
         self.engine = engine
         self.index = Index.build(catalog)
         self.notes: list[PlanNote] = []
+        #: The exchange in flight, held between asking and validating so that
+        #: the transcript entry can carry what the guard did with the answer.
+        self._exchange: logs.Exchange | None = None
 
     def plan(self, scan: Scan, *, ceiling: RiskTier = RiskTier.CAUTION,
-             elevated: bool = True, budget: int = 8) -> Plan:
+             elevated: bool = True, budget: int = 8, cycle_id: str = "") -> Plan:
         self.notes = []
+        self._exchange = None
+        log = logs.get()
         fallback = builtin_plan(scan, self.catalog, ceiling=ceiling,
                                 elevated=elevated, budget=budget)
 
@@ -159,43 +165,102 @@ class Planner:
         if self.engine is None or not self.engine.available:
             reason = self.engine.status if self.engine else "no model configured"
             self.notes.append(PlanNote("info", f"Planned without the model: {reason}."))
+            log.info("plan", "Planned without the model", reason=reason,
+                     actions=len(fallback.actions))
             return fallback
 
-        raw = self._ask_model(scan, ceiling, elevated, budget)
+        raw = self._ask_model(scan, ceiling, elevated, budget, cycle_id)
         if raw is None:
+            self._commit_exchange(accepted=[], rejected={},
+                                  note="unusable answer; built-in planner used")
             return fallback
 
         plan = self._validate(raw, scan, ceiling, elevated, budget)
+        self._commit_exchange(
+            accepted=[a.control_id for a in plan.actions],
+            rejected={k: v for k, v in plan.deferred.items()},
+            parsed={"summary": plan.summary[:400],
+                    "proposed": len(_as_list(raw.get("actions")))},
+        )
+
         if not plan.actions and fallback.actions:
             self.notes.append(PlanNote(
                 "warn",
                 "The model returned no usable actions, so the built-in planner was "
                 "used instead. Nothing was skipped.",
             ))
+            log.warn("plan", "Model produced no usable actions; used built-in planner",
+                     fallback_actions=len(fallback.actions))
             fallback.summary = plan.summary or fallback.summary
             return fallback
+
+        log.info("plan", f"Planned {len(plan.actions)} action(s)",
+                 model=plan.model_name, deferred=len(plan.deferred))
         return plan
+
+    def _commit_exchange(self, *, accepted: list[str], rejected: dict[str, str],
+                         parsed: dict[str, Any] | None = None,
+                         note: str = "") -> None:
+        """Write the pending exchange to the transcript, with its consequences."""
+        exchange = self._exchange
+        self._exchange = None
+        if exchange is None:
+            return
+        exchange.accepted = accepted
+        exchange.rejected = rejected
+        if parsed:
+            exchange.parsed = parsed
+        if note:
+            exchange.parsed = dict(exchange.parsed, note=note)
+        try:
+            logs.transcript().record(exchange)
+        except Exception:  # noqa: BLE001 - never fail a cycle over a log write
+            pass
 
     # -- calling --------------------------------------------------------
 
     def _ask_model(self, scan: Scan, ceiling: RiskTier, elevated: bool,
-                   budget: int) -> dict[str, Any] | None:
+                   budget: int, cycle_id: str = "") -> dict[str, Any] | None:
         queries = [f.observed or f.title for f in scan.by_severity()[:prompt_mod.MAX_FINDINGS]]
         must = {f.control_id for f in scan.findings}
         context = context_for(self.index, queries, must, limit=min(12, len(must) + 3))
 
         user = prompt_mod.build(scan, context, ceiling.value, elevated, budget)
+        log = logs.get()
+        log.debug("model", "Asking the model to plan",
+                  findings=len(scan.findings), context=len(context), budget=budget)
+
         reply = self.engine.ask(  # type: ignore[union-attr]
             prompt_mod.SYSTEM, user, schema=prompt_mod.PLAN_SCHEMA,
         )
+
+        # Build the transcript entry now, while the prompt and the raw reply are
+        # both in hand. It is completed and written after validation, so that the
+        # record shows not just what the model said but what was done with it.
+        self._exchange = logs.Exchange(
+            purpose="plan",
+            model=self.engine.name if self.engine else "",
+            system=prompt_mod.SYSTEM,
+            prompt=user,
+            reply=reply.text,
+            ok=reply.ok,
+            error=reply.error,
+            tokens=reply.tokens,
+            seconds=reply.seconds,
+            cycle_id=cycle_id,
+        )
+
         if not reply.ok:
             self.notes.append(PlanNote("warn", f"The model did not answer: {reply.error}"))
+            log.warn("model", "The model did not answer", detail=reply.error)
             return None
 
         data = extract_json(reply.text)
         if data is None:
             self.notes.append(PlanNote(
                 "warn", "The model's answer was not valid JSON; used the built-in planner."))
+            log.warn("model", "The model's answer was not valid JSON",
+                     reply_chars=len(reply.text), preview=reply.text[:200])
             return None
 
         self.notes.append(PlanNote(
@@ -203,6 +268,9 @@ class Planner:
             f"{self.engine.name} planned in {reply.seconds:.1f}s "  # type: ignore[union-attr]
             f"({reply.tps:.1f} tokens/s).",
         ))
+        log.info("model", f"{self.engine.name} answered",  # type: ignore[union-attr]
+                 seconds=round(reply.seconds, 2), tokens=reply.tokens,
+                 tps=round(reply.tps, 1))
         return data
 
     # -- validating -----------------------------------------------------

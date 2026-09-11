@@ -19,6 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
+from .. import logs
 from ..act.execute import ProbeReading, demo_reading, read_probe
 from ..catalog.loader import Catalog
 from ..core import Control, Fact, Finding, Scan, Severity, dedupe, utcnow
@@ -117,7 +118,15 @@ def scan(
                 try:
                     reading = future.result()
                 except Exception as exc:  # noqa: BLE001 - one bad probe must not end the scan
-                    result.errors[control.id] = str(exc)[:300]
+                    # A probe raising rather than returning an error is a bug in
+                    # the probe, so it gets a full report with the traceback -
+                    # unlike a probe that simply could not read its value, which
+                    # is an ordinary condition on a locked-down machine.
+                    report = logs.get().error(
+                        "scan", f"Probe {control.id} raised", exc=exc,
+                        control=control.id, domain=control.domain,
+                    )
+                    result.errors[control.id] = f"{str(exc)[:280]} ({report.error_id})"
                     continue
                 if not reading.usable:
                     result.errors[control.id] = reading.error

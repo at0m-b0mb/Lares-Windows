@@ -121,6 +121,20 @@ class Column(QWidget):
     def spacer(self) -> None:
         self.body.addStretch(1)
 
+    def clear(self) -> None:
+        """Remove and destroy every child, for a column rebuilt on each refresh.
+
+        ``takeAt`` alone leaves the widgets parented and visible, so each one is
+        explicitly detached and marked for deletion. Without this, a page that
+        refreshes on a timer accumulates every row it has ever shown.
+        """
+        while self.body.count():
+            item = self.body.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
 
 class Rule(QFrame):
     def __init__(self, parent=None) -> None:

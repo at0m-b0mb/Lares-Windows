@@ -12,12 +12,18 @@ one you want:
     Hearth     what this machine looks like right now, and the record of it
     Findings   everything open, worst first
     Ledger     every change Lares has made, and the button that undoes one
+    Chronicle  the activity log, the failures, and the model conversation
     Catalogue  the thirty controls, including the ones it will not touch
     Model      which model is running and why that one
     Colophon   how it is built, and what it deliberately does not claim
 """
 
 from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
@@ -38,6 +44,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import config as config_mod
+from .. import logs
 from ..act.execute import Executor
 from ..act.guard import Context
 from ..act.journal import Journal
@@ -54,7 +61,7 @@ from . import theme, widgets
 from .theme import Mode, space
 from .widgets import Card, Column, Field, NavButton, Row, Rule, SeverityBar, Text, Tile, Watch
 
-PAGES = ["Hearth", "Findings", "Ledger", "Catalogue", "Model", "Colophon"]
+PAGES = ["Hearth", "Findings", "Ledger", "Chronicle", "Catalogue", "Model", "Colophon"]
 
 
 # --------------------------------------------------------------------------
@@ -134,11 +141,14 @@ class Window(QMainWindow):
         self.page_hearth = HearthPage(self)
         self.page_findings = FindingsPage(self)
         self.page_ledger = LedgerPage(self)
+        self.page_chronicle = ChroniclePage(self)
         self.page_catalogue = CataloguePage(self)
         self.page_model = ModelPage(self)
         self.page_colophon = ColophonPage(self)
+        # The order here must match PAGES, since the sidebar selects by index.
         for page in (self.page_hearth, self.page_findings, self.page_ledger,
-                     self.page_catalogue, self.page_model, self.page_colophon):
+                     self.page_chronicle, self.page_catalogue, self.page_model,
+                     self.page_colophon):
             self.pages.addWidget(_scrolled(page))
         layout.add(self.pages, 1)
 
@@ -211,7 +221,8 @@ class Window(QMainWindow):
         for widget in self.findChildren(Tile):
             widget.apply(self.mode)
         for page in (self.page_hearth, self.page_findings, self.page_ledger,
-                     self.page_catalogue, self.page_model, self.page_colophon):
+                     self.page_chronicle, self.page_catalogue, self.page_model,
+                     self.page_colophon):
             if hasattr(page, "retheme"):
                 page.retheme(self.mode)
 
@@ -278,6 +289,7 @@ class Window(QMainWindow):
         self.page_hearth.refresh()
         self.page_findings.refresh()
         self.page_ledger.refresh()
+        self.page_chronicle.refresh()
 
     def _set_state(self, state: str, detail: str = "") -> None:
         self.state_label.setText(state)
@@ -559,6 +571,171 @@ class LedgerPage(Page):
         if path:
             written = write_report(window.scan, window.cycle, path)
             QMessageBox.information(self, "Report", f"Written to {written}")
+
+
+class ChroniclePage(Page):
+    """What Lares did, what broke, and what it said to the model.
+
+    Three records on one page because they are read together. When something
+    went wrong at four in the morning the question is never "show me the log" -
+    it is "what happened, did it fail, and what was the model thinking".
+    """
+
+    def __init__(self, window: Window) -> None:
+        super().__init__(window, "Chronicle",
+                         "The running account of what Lares has been doing, the "
+                         "failures it recorded, and every exchange with the model.")
+        mode = window.mode
+
+        controls = Row()
+        self.filter = QComboBox()
+        self.filter.addItems(["Everything", "Warnings and errors", "Errors only"])
+        self.filter.currentIndexChanged.connect(lambda _: self.refresh())
+        controls.add(Text("Show", "label", theme.MUTED, mode))
+        controls.add(self.filter)
+        self.open_button = QPushButton("Open the log folder")
+        self.open_button.clicked.connect(self.open_folder)
+        controls.add(self.open_button)
+        self.export_button = QPushButton("Export the conversation")
+        self.export_button.clicked.connect(self.export_transcript)
+        controls.add(self.export_button)
+        controls.spacer()
+        self.outer.addWidget(controls)
+
+        # -- activity ---------------------------------------------------
+        activity = Card(mode)
+        activity.add(widgets.heading("Activity", mode))
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["When", "Level", "Area", "What happened"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        head = self.table.horizontalHeader()
+        head.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        for col in (0, 1, 2):
+            head.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setFixedHeight(300)
+        activity.add(self.table)
+        self.outer.addWidget(activity)
+
+        # -- errors -----------------------------------------------------
+        self.errors_card = Card(mode)
+        self.errors_card.add(widgets.heading("Failures", mode))
+        self.errors_body = Column()
+        self.errors_card.add(self.errors_body)
+        self.outer.addWidget(self.errors_card)
+
+        # -- the model conversation -------------------------------------
+        talk = Card(mode)
+        talk.add(widgets.heading("Conversation with the model", mode))
+        talk.add(Text(
+            "Each exchange records what Lares asked, what the model answered, "
+            "and which of its choices the guard accepted or refused.",
+            "body", theme.INK_SOFT, mode, wrap=True))
+        self.talk_body = Column()
+        talk.add(self.talk_body)
+        self.outer.addWidget(talk)
+        self.outer.addStretch(1)
+
+    # -- data -----------------------------------------------------------
+
+    def refresh(self) -> None:
+        mode = self.window_ref.mode
+        log = logs.get()
+
+        level = {1: logs.Level.WARN, 2: logs.Level.ERROR}.get(self.filter.currentIndex())
+        records = log.tail(limit=200, level=level)[::-1]
+
+        self.table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            cells = [record.local_time, record.level.value, record.area,
+                     record.message + (f"  [{record.error_id}]" if record.error_id else "")]
+            for col, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                if col == 1:
+                    item.setForeground(_level_colour(record.level).q(mode))
+                elif col in (0, 2):
+                    item.setForeground(theme.MUTED.q(mode))
+                self.table.setItem(row, col, item)
+
+        self._fill_errors(log, mode)
+        self._fill_talk(mode)
+
+    def _fill_errors(self, log: logs.Log, mode: Mode) -> None:
+        self.errors_body.clear()
+        reports = log.errors(limit=10)
+        if not reports:
+            self.errors_body.add(Text(
+                "Nothing has failed. Failures are written here with a full "
+                "traceback and a reference you can quote.",
+                "body", theme.INK_SOFT, mode, wrap=True))
+            return
+        for report in reports:
+            self.errors_body.add(Field(report.error_id, report.message, mode))
+            detail = report.at.replace("T", " ").replace("Z", " UTC")
+            if report.exception_type:
+                detail += f"  -  {report.exception_type}: {report.exception_text[:120]}"
+            self.errors_body.add(Text(detail, "small", theme.MUTED, mode, wrap=True))
+            self.errors_body.add(Rule())
+
+    def _fill_talk(self, mode: Mode) -> None:
+        self.talk_body.clear()
+        exchanges = logs.transcript().recent(limit=8)
+        if not exchanges:
+            self.talk_body.add(Text(
+                "No exchanges yet. With no model installed the built-in planner "
+                "decides instead, and there is no conversation to record - the "
+                "Model page says which is happening here.",
+                "body", theme.INK_SOFT, mode, wrap=True))
+            return
+
+        for exchange in exchanges:
+            self.talk_body.add(Field(
+                exchange.at.replace("T", " ").replace("Z", ""), exchange.headline(), mode))
+            if exchange.model:
+                self.talk_body.add(Text(exchange.model, "small", theme.MUTED, mode))
+            if exchange.accepted:
+                self.talk_body.add(Text(
+                    "Accepted: " + ", ".join(exchange.accepted),
+                    "small", theme.MUTED, mode, wrap=True))
+            for control_id, why in list(exchange.rejected.items())[:4]:
+                self.talk_body.add(Text(f"Refused {control_id} - {why}", "small", theme.MUTED, mode, wrap=True))
+            self.talk_body.add(Rule())
+
+    # -- actions --------------------------------------------------------
+
+    def open_folder(self) -> None:
+        path = logs.get().dir
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.information(self, "Log folder", f"The log is at {path}\n\n{exc}")
+
+    def export_transcript(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export the conversation", "lares-conversation.md", "Markdown (*.md)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(logs.transcript().as_markdown(limit=50), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Export", f"Could not write {path}: {exc}")
+            return
+        QMessageBox.information(self, "Export", f"Written to {path}")
+
+
+def _level_colour(level: logs.Level):
+    return {
+        logs.Level.ERROR: theme.STATUS.get("failed", theme.NEUTRAL),
+        logs.Level.WARN: theme.STATUS.get("rolled_back", theme.NEUTRAL),
+    }.get(level, theme.MUTED)
 
 
 class CataloguePage(Page):

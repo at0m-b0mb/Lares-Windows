@@ -110,6 +110,34 @@ class Console:
     def detail(self, text: str) -> None:
         self._write(f"      {' '.join(text.split())[:150]}", DIM)
 
+    def advice(self, text: str, indent: int = 6) -> None:
+        """Wrapped, indented prose. For guidance that will not fit on one line.
+
+        ``detail`` truncates on purpose, because it sits under findings where a
+        long tail would bury the list. Remedies are the opposite case: the whole
+        point is the sentence that says what to do, so it wraps instead.
+        """
+        pad = " " * indent
+        width = min(self.width, 78) - indent
+        for block in text.split("\n"):
+            block = block.strip()
+            if not block:
+                continue
+            # A line that is already laid out - an indented command, say - is
+            # passed through rather than reflowed into a paragraph.
+            if block.startswith(("pip ", "lares ", "python ", "  ")):
+                self._write(pad + block, DIM)
+                continue
+            line = ""
+            for word in block.split():
+                if len(line) + len(word) + 1 > width:
+                    self._write(pad + line, DIM)
+                    line = word
+                else:
+                    line = f"{line} {word}".strip()
+            if line:
+                self._write(pad + line, DIM)
+
     def dim(self, text: str) -> None:
         self._write(f"  {text}", DIM)
 

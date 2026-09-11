@@ -15,9 +15,11 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from .. import config as config_mod
+from .. import logs, preflight
 from ..autonomy.breaker import Breaker
 from ..autonomy.loop import Agent, Event, build
 from ..brain import download, models
@@ -497,6 +499,161 @@ def cmd_controls(args: argparse.Namespace, console: Console) -> int:
 
 
 # --------------------------------------------------------------------------
+def cmd_doctor(args: argparse.Namespace, console: Console) -> int:
+    """Report what this machine can run, and what it cannot."""
+    console.rule("Preflight")
+    checks = preflight.run()
+
+    for check in checks:
+        line = f"{check.name}: {check.detail}"
+        if check.state is preflight.State.OK:
+            console.ok(line)
+        elif check.state is preflight.State.WARN:
+            console.warn(line)
+        else:
+            console.error(line)
+        if check.remedy and (args.verbose or check.state is not preflight.State.OK):
+            console.advice(check.remedy)
+
+    console.blank()
+    state = preflight.worst(checks)
+    if state is preflight.State.FAIL:
+        console.error(preflight.verdict(checks))
+        return 1
+    if state is preflight.State.WARN:
+        console.warn(preflight.verdict(checks))
+    else:
+        console.ok(preflight.verdict(checks))
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace, console: Console) -> int:
+    """Show the running narrative."""
+    log = logs.get()
+    level = logs.Level(args.level) if args.level else None
+    records = log.tail(limit=args.limit, level=level, area=args.area or "")
+
+    if not records:
+        console.dim(f"Nothing logged yet. The log lives at {log.text_path}")
+        return 0
+
+    console.rule(f"Log ({len(records)} most recent)")
+    for record in records:
+        text = f"{record.local_time}  {record.area:7}  {record.message}"
+        if record.error_id:
+            text += f"  [{record.error_id}]"
+        if record.level is logs.Level.ERROR:
+            console.error(text)
+        elif record.level is logs.Level.WARN:
+            console.warn(text)
+        else:
+            console.dim(text)
+        if args.verbose and record.fields:
+            console.detail("  " + ", ".join(f"{k}={v}" for k, v in record.fields.items()))
+
+    console.blank()
+    console.dim(f"Full log: {log.text_path}")
+    return 0
+
+
+def cmd_errors(args: argparse.Namespace, console: Console) -> int:
+    """Show error reports, or one in full."""
+    log = logs.get()
+
+    if args.show:
+        report = log.find_error(args.show)
+        if report is None:
+            console.error(f"No error report with id {args.show}.")
+            return 1
+        console.rule(report.error_id)
+        console.field("When", report.at)
+        console.field("Where", report.area)
+        console.field("What", report.message)
+        if report.exception_type:
+            console.field("Exception", f"{report.exception_type}: {report.exception_text}")
+        if report.environment:
+            console.blank()
+            console.section("Environment")
+            for key, value in report.environment.items():
+                console.field(key, value)
+        if report.context:
+            console.blank()
+            console.section("Context")
+            for key, value in report.context.items():
+                console.field(key, str(value))
+        if report.traceback_text:
+            console.blank()
+            console.section("Traceback")
+            console.script(report.traceback_text)
+        return 0
+
+    reports = log.errors(limit=args.limit)
+    if not reports:
+        console.ok("No errors have been recorded.")
+        console.dim(f"They would be at {log.errors_dir}")
+        return 0
+
+    console.rule(f"Errors ({len(reports)})")
+    for report in reports:
+        console.error(f"{report.error_id}  {report.at}  {report.area}: {report.message}")
+        if report.exception_type:
+            console.detail(f"{report.exception_type}: {report.exception_text[:160]}")
+    console.blank()
+    console.dim(f"Show one in full with: lares errors --show {reports[0].error_id}")
+    return 0
+
+
+def cmd_transcript(args: argparse.Namespace, console: Console) -> int:
+    """Show what was said to the model and what it said back."""
+    tape = logs.transcript()
+
+    if args.export:
+        path = Path(args.export)
+        try:
+            path.write_text(tape.as_markdown(limit=args.limit), encoding="utf-8")
+        except OSError as exc:
+            console.error(f"Could not write {path}: {exc}")
+            return 1
+        console.ok(f"Wrote {path}")
+        return 0
+
+    exchanges = tape.recent(limit=args.limit)
+    if not exchanges:
+        console.dim("No model exchanges recorded yet.")
+        console.detail(
+            "Exchanges are written when the model plans a cycle. With no model "
+            "installed the built-in planner is used and there is nothing to "
+            "transcribe - 'lares doctor' will say which is the case here."
+        )
+        return 0
+
+    console.rule(f"Model transcript ({len(exchanges)} most recent)")
+    for exchange in exchanges:
+        console.blank()
+        console.section(f"{exchange.at}  {exchange.purpose}")
+        console.field("Model", exchange.model or "unknown")
+        console.field("Result", exchange.headline())
+        if exchange.accepted:
+            console.field("Accepted", ", ".join(exchange.accepted))
+        for control_id, why in list(exchange.rejected.items())[:8]:
+            console.detail(f"refused {control_id}: {why}")
+        if args.verbose:
+            if exchange.prompt:
+                console.blank()
+                console.section("Asked")
+                console.script(exchange.prompt[:6000])
+            if exchange.reply:
+                console.blank()
+                console.section("Answered")
+                console.script(exchange.reply[:6000])
+
+    console.blank()
+    console.dim(f"Full transcript: {tape.path}")
+    console.dim("Add -v for the prompts, or --export notes.md for a readable copy.")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Argument parsing
 # --------------------------------------------------------------------------
 
@@ -511,6 +668,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="use synthetic data and change nothing")
     parser.add_argument("--plain", action="store_true",
                         help="plain text output, no colour or boxes")
+    parser.add_argument("--debug", action="store_true",
+                        help="log at debug level and mirror the log to stderr")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p: argparse.ArgumentParser) -> None:
@@ -580,6 +739,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--set", action="append", metavar="NAME=VALUE")
     p.set_defaults(func=cmd_config)
 
+    p = sub.add_parser("doctor", help="check what this machine can run")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="show the advice for passing checks too")
+    p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("logs", help="what Lares has been doing")
+    p.add_argument("-n", "--limit", type=int, default=60)
+    p.add_argument("--level", choices=[lv.value for lv in logs.Level],
+                   help="show this level and above")
+    p.add_argument("--area", help="one of scan, plan, model, act, cycle, system")
+    p.add_argument("-v", "--verbose", action="store_true", help="include structured fields")
+    p.set_defaults(func=cmd_logs)
+
+    p = sub.add_parser("errors", help="failures, each with a full report")
+    p.add_argument("-n", "--limit", type=int, default=20)
+    p.add_argument("--show", metavar="ID", help="print one report in full, e.g. LR-4F2A91")
+    p.set_defaults(func=cmd_errors)
+
+    p = sub.add_parser("transcript", help="the conversation with the model")
+    p.add_argument("-n", "--limit", type=int, default=10)
+    p.add_argument("-v", "--verbose", action="store_true", help="include prompts and replies")
+    p.add_argument("--export", metavar="PATH", help="write it out as markdown")
+    p.set_defaults(func=cmd_transcript)
+
     return parser
 
 
@@ -590,16 +773,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.demo:
         set_demo(True)
 
+    # Logging is configured before anything else runs, so that a failure during
+    # start-up lands on disk like every other failure rather than vanishing.
+    logs.configure(
+        level=logs.Level.DEBUG if getattr(args, "debug", False) else logs.Level.INFO,
+        echo=getattr(args, "debug", False),
+    )
+    logs.install_excepthook()
+
     console = Console(plain=args.plain)
     try:
         return args.func(args, console)
     except loader.CatalogError as exc:
+        logs.get().error("config", "The control catalogue is not usable", exc=exc)
         console.error(f"The control catalogue is not usable: {exc}")
         return 2
     except KeyboardInterrupt:
         console.blank()
         console.dim("Stopped.")
         return 130
+    except Exception as exc:  # noqa: BLE001
+        # Anything that gets this far is a bug. Write the report, then tell the
+        # user the one thing they need in order to send it to us.
+        report = logs.get().error("cli", f"{args.command} failed", exc=exc,
+                                  command=args.command)
+        console.error(f"{args.command} failed: {exc}")
+        console.detail(f"Full report saved as {report.error_id}.")
+        console.detail(f"See it with: lares errors --show {report.error_id}")
+        return 3
 
 
 if __name__ == "__main__":
