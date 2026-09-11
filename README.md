@@ -184,6 +184,30 @@ consequences are not measurable by a health check:
 Each is reported with the catalogue's own reasoning, in the terminal under
 **Needs a person** and in the desktop application under **Findings**.
 
+## Status, stated plainly
+
+**v0.1.0. The engine is tested; the PowerShell is not.**
+
+The Python — the guard, the executor's state machine, the planner, the catalogue
+loader, the theme — is covered by 251 assertions that run on Windows and Linux in
+CI. That part works.
+
+What has **not** happened is any of the thirty controls being executed against a
+live Windows machine. Every probe and remediation in the catalogue was written
+against Microsoft's documentation and reviewed by hand, and every one of them is
+exercised in demo mode, which fakes the PowerShell round trip. So the shapes are
+right and the logic around them is right, but a cmdlet that behaves differently
+on Windows 11 24H2 than the documentation says would not have been caught yet.
+
+Treat this release as ready to be tried on a machine you can afford to restore.
+Start with `--dry-run` and read the plan before you let it act:
+
+```bash
+python lares.py run --dry-run --report first-look.html
+```
+
+Findings from real hardware are the most useful thing anyone could contribute.
+
 ## Installing
 
 Windows is the target. macOS and Linux run everything in demo mode against a
