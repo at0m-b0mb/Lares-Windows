@@ -22,6 +22,22 @@ Or let the installer choose, verify and put it on your PATH:
 irm https://raw.githubusercontent.com/at0m-b0mb/Lares-Windows/main/install.ps1 | iex
 ```
 
+## Letting the model lead
+
+`lares run` hands the model a scan and asks it to choose. `lares consult`
+inverts that — the model asks what it wants to look at, those checks are run,
+and it is asked again until it gives a verdict.
+
+```powershell
+lares consult
+lares consult --apply
+```
+
+Everything it can ask for is a read-only check from the catalogue, and its
+verdict goes through the same guard as any other plan. `--model-only` is the
+simpler form: the ordinary scan, but the model is the sole decision-maker and
+nothing is changed if it cannot answer.
+
 ## Start here
 
 `doctor` says whether this machine can run it. `scan` changes nothing. `plan`
@@ -55,7 +71,7 @@ and closing.
 
 ## Known limits, stated plainly
 
-**The engine is tested; the PowerShell is not.** 364 tests run on Windows and
+**The engine is tested; the PowerShell is not.** 378 tests run on Windows and
 Linux across Python 3.10 and 3.12, and CI installs this release with
 `install.ps1` on a clean x64 and a clean ARM64 machine and runs the result. But no control in the catalogue has yet
 executed against a live Windows machine — every probe and remediation was written
