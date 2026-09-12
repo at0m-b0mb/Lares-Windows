@@ -183,16 +183,21 @@ ASSESS_SCHEMA: dict[str, Any] = {
     },
 }
 
-#: Same reasoning, and the scripts are generously bounded rather than tightly:
-#: a remediation that needs twelve hundred characters is unusual but real, and
-#: cutting one off mid-statement would be worse than the prose problem this
-#: guards against.
+#: The prose here is bounded and the scripts deliberately are not, which is
+#: the opposite of what it looks like it should be. llama.cpp compiles a
+#: maxLength into a grammar rule repeated that many times, and refuses outright
+#: past a limit - "the number of rules that are going to be repeated multiplied
+#: by the new repetition exceeds sane defaults". A release build bounded these
+#: at 1200 and 1600 characters, the grammar would not compile, the engine fell
+#: back to generating unconstrained, and the model then wrote no fix at all.
+#: Bounding a script costs the whole remedy and buys very little: looping is a
+#: prose failure, and REPEAT_PENALTY covers what is left of it in code.
 REMEDY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "check": {"type": "string", "maxLength": 1200},
-        "fix": {"type": "string", "maxLength": 1600},
-        "undo": {"type": "string", "maxLength": 1600},
+        "check": {"type": "string"},
+        "fix": {"type": "string"},
+        "undo": {"type": "string"},
         "explain": {"type": "string", "maxLength": 400},
     },
     "required": ["fix"],

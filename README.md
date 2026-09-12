@@ -492,7 +492,7 @@ a different program — see [The freehand lane](#the-freehand-lane).
 
 ## Status, stated plainly
 
-**v0.5.1. The engine is tested. Most of the PowerShell has run once, on one machine.**
+**v0.5.2. The engine is tested. Most of the PowerShell has run once, on one machine.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
 loader, the logging, the theme — is covered by **482 tests** that run on Windows

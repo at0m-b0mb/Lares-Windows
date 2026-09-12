@@ -94,6 +94,20 @@ class _Shape(Exception):
     """The backend returned something this code does not understand."""
 
 
+def _warn(message: str, **fields: Any) -> None:
+    """Log, without making this module depend on logging to function.
+
+    The import is local because engine.py is imported during startup logging
+    on some paths, and a module-level import would be a cycle waiting to be
+    discovered by whoever changed the order next.
+    """
+    try:
+        from .. import logs
+        logs.get().warn("model", message, **fields)
+    except Exception:  # noqa: BLE001 - never lose an answer over a log line
+        pass
+
+
 def _safely(call: Callable[..., Any], *args: Any) -> None:
     """Run a watcher callback, absorbing anything it does.
 
@@ -275,9 +289,19 @@ class Engine:
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             if schema is not None:
-                # Older llama-cpp-python builds reject a schema in response_format.
-                # Retrying unconstrained is much better than failing the cycle;
-                # the parser downstream is written to cope with loose output.
+                # Older llama-cpp-python builds reject a schema in
+                # response_format, and llama.cpp itself refuses a grammar whose
+                # repetitions it considers excessive. Retrying unconstrained is
+                # much better than failing the cycle; the parser downstream is
+                # written to cope with loose output.
+                #
+                # It is logged rather than swallowed, because this is a silent
+                # downgrade of the one mechanism that keeps a small model's
+                # output parseable. A build once bounded a schema too
+                # generously, landed here every time, and presented as "the
+                # model wrote no fix" - a symptom three steps from its cause.
+                _warn("The model schema was rejected; generating without a "
+                      "grammar", detail=message[:200])
                 return self.ask(system, user, max_tokens=max_tokens, schema=None,
                                 temperature=temperature,
                                 repeat_penalty=repeat_penalty, _echoed=True)

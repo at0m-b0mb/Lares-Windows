@@ -582,21 +582,86 @@ def test_the_issues_are_asked_for_before_the_summary():
         "the prompt must show the same order the schema generates in"
 
 
-def test_every_string_the_model_writes_is_bounded():
+def fields_of(schema, path=()):
+    """Every string field in a schema, with the path that reaches it."""
+    if isinstance(schema, dict):
+        if schema.get("type") == "string":
+            yield path, schema
+        for key, value in schema.items():
+            yield from fields_of(value, path + (key,))
+    elif isinstance(schema, list):
+        for item in schema:
+            yield from fields_of(item, path)
+
+
+def test_every_piece_of_prose_the_model_writes_is_bounded():
     """The only thing that reliably stops a small model writing forever is the
     grammar, and the grammar only bounds what the schema bounds."""
     from lares.brain.freehand import ASSESS_SCHEMA, REMEDY_SCHEMA
 
-    def strings(node):
-        if isinstance(node, dict):
-            if node.get("type") == "string":
-                yield node
-            for value in node.values():
-                yield from strings(value)
-        elif isinstance(node, list):
-            for item in node:
-                yield from strings(item)
+    for schema in (ASSESS_SCHEMA, REMEDY_SCHEMA):
+        for path, field in fields_of(schema):
+            if path[-1] in ("check", "fix", "undo"):
+                continue
+            assert "maxLength" in field, f"unbounded prose at {path}"
+
+
+def test_the_scripts_are_deliberately_not_bounded():
+    """The opposite of what it looks like it should be, and load-bearing.
+
+    llama.cpp compiles a maxLength into a grammar rule repeated that many
+    times and refuses outright past a limit. A release build bounded these at
+    1200 and 1600 characters, the grammar would not compile, the engine fell
+    back to generating unconstrained, and the model then wrote no fix at all -
+    a symptom three steps from its cause. Bounding a script costs the whole
+    remedy and buys very little.
+    """
+    from lares.brain.freehand import REMEDY_SCHEMA
+
+    for name in ("check", "fix", "undo"):
+        assert "maxLength" not in REMEDY_SCHEMA["properties"][name]
+
+
+def test_a_bound_is_never_large_enough_to_break_the_grammar():
+    """Kept well under what llama.cpp will compile, with room to spare."""
+    from lares.brain.freehand import ASSESS_SCHEMA, REMEDY_SCHEMA
 
     for schema in (ASSESS_SCHEMA, REMEDY_SCHEMA):
-        for field in strings(schema):
-            assert "maxLength" in field, f"unbounded string: {field}"
+        for path, field in fields_of(schema):
+            limit = field.get("maxLength")
+            if limit is not None:
+                assert limit <= 500, f"{path} at {limit} risks the grammar"
+
+
+def test_a_rejected_schema_is_logged_rather_than_swallowed(monkeypatch, tmp_path):
+    """The silent downgrade that hid the bug above.
+
+    Falling back to unconstrained generation is the right behaviour - much
+    better than failing the cycle. Doing it quietly is not, because it turns a
+    schema problem into "the model wrote no fix" with nothing in between.
+    """
+    from lares.brain.engine import Engine, Reply
+
+    said: list[tuple[str, str]] = []
+    monkeypatch.setattr("lares.brain.engine._warn",
+                        lambda message, **fields: said.append((message, fields.get("detail", ""))))
+
+    engine = Engine()
+    monkeypatch.setattr(engine, "load", lambda: True)
+
+    class Fussy:
+        def __init__(self):
+            self.calls = 0
+
+        def create_chat_completion(self, **kwargs):
+            self.calls += 1
+            if "response_format" in kwargs:
+                raise ValueError("exceeds sane defaults")
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    engine._llama = Fussy()
+    reply = engine.ask("sys", "user", schema={"type": "object"})
+
+    assert isinstance(reply, Reply) and reply.ok
+    assert said and "schema was rejected" in said[0][0]
+    assert "sane defaults" in said[0][1], "the reason must survive into the log"

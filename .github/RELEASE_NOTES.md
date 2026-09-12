@@ -74,8 +74,11 @@ it until its token budget is gone — a release build caught one saying the same
 thing forty-five times inside a single JSON string, never reaching the part of
 the answer that mattered. Four things changed because of it:
 
-- every string the model writes is **bounded in the schema**, so where the
-  backend compiles that into a grammar the limit is enforced by the sampler;
+- every piece of **prose** the model writes is bounded in the schema, so where
+  the backend compiles that into a grammar the limit is enforced by the
+  sampler — the scripts deliberately are not, because llama.cpp refuses a
+  grammar with that many repetitions and then generates with no grammar at
+  all, which is strictly worse;
 - the findings are **asked for before the summary**, so if the model does lose
   itself in prose it does so *after* the part worth having;
 - a reply that **ran out of room is recovered** rather than discarded — rewound

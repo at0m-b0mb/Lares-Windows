@@ -190,6 +190,13 @@ jobs:
           if ($fh -notmatch "what is on this machine") {
             throw "the freehand single file did not get as far as reading the machine"
           }
+          # Deterministic, and about this repository rather than about the
+          # model's judgement: llama.cpp refuses a grammar whose repetitions it
+          # considers excessive, the engine then generates unconstrained, and
+          # the visible symptom is "the model wrote none" three steps later.
+          if ($fh -match "error parsing grammar") {
+            throw "llama.cpp refused the schema grammar - a maxLength is too large"
+          }
           Write-Host "the freehand single file finds its model"
 
       - uses: actions/upload-artifact@v4
@@ -348,6 +355,13 @@ jobs:
           }
           if ($fh -notmatch "what is on this machine") {
             throw "the freehand ARM64 single file did not get as far as reading the machine"
+          }
+          # Deterministic, and about this repository rather than about the
+          # model's judgement: llama.cpp refuses a grammar whose repetitions it
+          # considers excessive, the engine then generates unconstrained, and
+          # the visible symptom is "the model wrote none" three steps later.
+          if ($fh -match "error parsing grammar") {
+            throw "llama.cpp refused the schema grammar - a maxLength is too large"
           }
           Write-Host "the freehand ARM64 single file finds its model"
 
