@@ -66,6 +66,8 @@ class Console:
         self.plain = plain or not _RICH or not sys.stdout.isatty()
         self._rich = RichConsole(highlight=False, soft_wrap=False) if _RICH and not plain else None
         self.width = shutil.get_terminal_size((88, 24)).columns
+        #: True between the first streamed fragment and stream_end().
+        self._streaming = False
 
     # -- primitives -----------------------------------------------------
 
@@ -276,6 +278,38 @@ class Console:
     def script(self, text: str) -> None:
         for line in text.rstrip().splitlines():
             self._write(f"    {line}", DIM)
+
+    # -- streamed model output ------------------------------------------
+
+    def token(self, text: str) -> None:
+        """One fragment of a reply, written the moment it exists.
+
+        This is called once per token while a model generates, so it does the
+        least possible work: no wrapping, no styling, no newline. rich is
+        bypassed entirely - its print() ends every call with a line break,
+        which would put each token on its own line.
+
+        A console that cannot encode what the model produced is a display
+        problem. It must not become a generation problem, so the write is
+        allowed to fail and the reply survives regardless.
+        """
+        if not self._streaming:
+            self._streaming = True
+            self._raw("    ")
+        self._raw(text.replace("\n", "\n    "))
+
+    def stream_end(self) -> None:
+        """Close the streamed block, if one is open."""
+        if self._streaming:
+            self._streaming = False
+            self._raw("\n")
+
+    def _raw(self, text: str) -> None:
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except (OSError, ValueError, UnicodeEncodeError):
+            pass
 
     # -- status spinner -------------------------------------------------
 

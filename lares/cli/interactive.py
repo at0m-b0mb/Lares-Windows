@@ -120,6 +120,10 @@ ITEMS: list[tuple[str, str, list[str]]] = [
      "One round trip with the working shown: the prompt, the model's reply, "
      "what the guard made of it, and the exact script.",
      ["demo"]),
+    ("Watch it talk to the model",
+     "The model leads - it asks what to look at, then says what to do - and "
+     "every word in both directions is printed as it is written.",
+     ["consult", "--live"]),
     ("Settings",
      "How much it is allowed to do, and how often.",
      ["config"]),

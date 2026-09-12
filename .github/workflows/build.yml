@@ -8,13 +8,17 @@
 #
 # What comes out:
 #
-#   lares-x64.exe               terminal application, ~45 MB, fetches a model when it wants one
-#   lares-desktop-x64.exe       desktop application, ~90 MB
-#   lares-full-x64.exe          terminal application with the 1.5B model inside it, ~1.1 GB
-#   lares-arm64.exe             terminal application for Windows on ARM
-#   lares-desktop-arm64.exe     desktop application for Windows on ARM
+#   lares-x64.exe                terminal application, ~45 MB, fetches a model when it wants one
+#   lares-desktop-x64.exe        desktop application, ~90 MB
+#   lares-freehand-x64.exe       the no-catalogue lane: the model writes every fix
+#   lares-full-x64.exe           terminal application with the 1.5B model inside it, ~1.1 GB
+#   lares-freehand-full-x64.exe  the no-catalogue lane with the model inside it, ~1.1 GB
+#   lares-arm64.exe              terminal application for Windows on ARM
+#   lares-desktop-arm64.exe      desktop application for Windows on ARM
+#   lares-freehand-arm64.exe     the no-catalogue lane for Windows on ARM
 #
-#   lares-full-arm64.exe        the same, for ARM - only when the backend compiles
+#   lares-full-arm64.exe           the same, for ARM - only when the backend compiles
+#   lares-freehand-full-arm64.exe  and the same for the freehand lane
 #
 # llama-cpp-python publishes no ARM64 wheel, so the ARM64 job tries to compile
 # one. llama.cpp refuses to build with MSVC on ARM ("use clang"), so the build
@@ -90,11 +94,22 @@ jobs:
           ./dist/lares.exe --plain --demo scan | Select-Object -First 20
           if (-not (Test-Path ./dist/lares-desktop.exe)) { throw "desktop build missing" }
 
+          # The freehand binary is the one that claims to carry no catalogue,
+          # so the smoke test checks the claim rather than restating it: the
+          # recorded walkthrough exercises every stage of the lane without a
+          # model, and the binary must not be able to read a control.
+          ./dist/lares-freehand.exe --version
+          $walk = ./dist/lares-freehand.exe --plain --demo --recorded --budget 2 | Out-String
+          if ($walk -notmatch "the code the model wrote") { throw "freehand walkthrough did not run" }
+          if ($walk -notmatch "REACHABLE FROM THE NETWORK") { throw "freehand read no ports" }
+          if ($walk -match "NET-005|IDN-001|SVC-003") { throw "the freehand build is carrying catalogue controls" }
+
       - name: Name them for the release
         shell: pwsh
         run: |
           Copy-Item dist/lares.exe dist/lares-x64.exe
           Copy-Item dist/lares-desktop.exe dist/lares-desktop-x64.exe
+          Copy-Item dist/lares-freehand.exe dist/lares-freehand-x64.exe
 
       - uses: actions/upload-artifact@v4
         with:
@@ -102,6 +117,7 @@ jobs:
           path: |
             dist/lares-x64.exe
             dist/lares-desktop-x64.exe
+            dist/lares-freehand-x64.exe
 
       # -- the single file with the model inside it -----------------------
       - name: Fetch the model
@@ -125,6 +141,13 @@ jobs:
           python winbuild/embed_model.py dist/lares.exe $env:MODEL_FILE --output dist/lares-full-x64.exe
           python winbuild/embed_model.py --check dist/lares-full-x64.exe
 
+          # The freehand lane needs the model more than any other build does:
+          # without one it has nothing to fall back on and refuses to run at
+          # all, which makes the single file that carries it the only form of
+          # that program most people should want.
+          python winbuild/embed_model.py dist/lares-freehand.exe $env:MODEL_FILE --output dist/lares-freehand-full-x64.exe
+          python winbuild/embed_model.py --check dist/lares-freehand-full-x64.exe
+
       - name: Prove the single file actually works
         if: github.event_name == 'push' || inputs.embed_model
         shell: pwsh
@@ -146,11 +169,23 @@ jobs:
           }
           Write-Host "the bundled backend loads"
 
+          # And the freehand single file, which is the one that cannot work
+          # without it. "no model here" is its one refusal, so a build that
+          # says that is a build nobody can use.
+          $fh = ./dist/lares-freehand-full-x64.exe --plain --demo --dry-run --budget 1 | Out-String
+          if ($fh -match "there is no model here") {
+            Write-Host $fh
+            throw "the freehand single file cannot see its own embedded model"
+          }
+          Write-Host "the freehand single file finds its model"
+
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' || inputs.embed_model
         with:
           name: lares-full-x64
-          path: dist/lares-full-x64.exe
+          path: |
+            dist/lares-full-x64.exe
+            dist/lares-freehand-full-x64.exe
           compression-level: 0     # a Q4 GGUF does not compress; skip the hour
 
   # ------------------------------------------------------------------------
@@ -230,11 +265,17 @@ jobs:
           ./dist/lares.exe --plain doctor
           ./dist/lares.exe --plain --demo scan | Select-Object -First 20
 
+          ./dist/lares-freehand.exe --version
+          $walk = ./dist/lares-freehand.exe --plain --demo --recorded --budget 2 | Out-String
+          if ($walk -notmatch "the code the model wrote") { throw "freehand walkthrough did not run" }
+          if ($walk -match "NET-005|IDN-001|SVC-003") { throw "the freehand build is carrying catalogue controls" }
+
       - name: Name them for the release
         shell: pwsh
         run: |
           Copy-Item dist/lares.exe dist/lares-arm64.exe
           Copy-Item dist/lares-desktop.exe dist/lares-desktop-arm64.exe
+          Copy-Item dist/lares-freehand.exe dist/lares-freehand-arm64.exe
 
       - uses: actions/upload-artifact@v4
         with:
@@ -242,6 +283,7 @@ jobs:
           path: |
             dist/lares-arm64.exe
             dist/lares-desktop-arm64.exe
+            dist/lares-freehand-arm64.exe
 
       # -- the single file with the model inside it, for ARM64 ------------
       - name: Fetch the model
@@ -259,6 +301,9 @@ jobs:
           python winbuild/embed_model.py dist/lares.exe $env:MODEL_FILE --output dist/lares-full-arm64.exe
           python winbuild/embed_model.py --check dist/lares-full-arm64.exe
 
+          python winbuild/embed_model.py dist/lares-freehand.exe $env:MODEL_FILE --output dist/lares-freehand-full-arm64.exe
+          python winbuild/embed_model.py --check dist/lares-freehand-full-arm64.exe
+
       - name: Prove the ARM64 single file actually loads its model
         if: env.HAS_BACKEND == 'true'
         shell: pwsh
@@ -273,11 +318,20 @@ jobs:
           }
           Write-Host "the bundled ARM64 backend loads"
 
+          $fh = ./dist/lares-freehand-full-arm64.exe --plain --demo --dry-run --budget 1 | Out-String
+          if ($fh -match "there is no model here") {
+            Write-Host $fh
+            throw "the freehand ARM64 single file cannot see its own embedded model"
+          }
+          Write-Host "the freehand ARM64 single file finds its model"
+
       - uses: actions/upload-artifact@v4
         if: env.HAS_BACKEND == 'true'
         with:
           name: lares-full-arm64
-          path: dist/lares-full-arm64.exe
+          path: |
+            dist/lares-full-arm64.exe
+            dist/lares-freehand-full-arm64.exe
           compression-level: 0
 
   # ------------------------------------------------------------------------
@@ -352,14 +406,15 @@ jobs:
 
       - name: Install it the way a person would
         shell: pwsh
-        run: ./install.ps1 -Version ${{ github.ref_name }} -Desktop
+        run: ./install.ps1 -Version ${{ github.ref_name }} -Desktop -Freehand
 
       - name: The installed command must work
         shell: pwsh
         run: |
-          $exe = "$env:LOCALAPPDATA\Programs\Lares\lares.exe"
+          $dir = "$env:LOCALAPPDATA\Programs\Lares"
+          $exe = "$dir\lares.exe"
           if (-not (Test-Path $exe)) { throw "lares.exe was not installed" }
-          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\Lares\lares-desktop.exe")) {
+          if (-not (Test-Path "$dir\lares-desktop.exe")) {
             throw "lares-desktop.exe was not installed"
           }
           & $exe --version
@@ -367,6 +422,28 @@ jobs:
           & $exe --plain --demo scan | Select-Object -First 15
           & $exe --plain --demo run  | Select-Object -First 15
           & $exe --plain logs -n 5
+
+      - name: And so must the freehand program
+        shell: pwsh
+        run: |
+          # The naming here is the part worth testing rather than asserting:
+          # lares-freehand-full-x64.exe matches the pattern for the ordinary
+          # full build too, so getting the order of those tests wrong installs
+          # the freehand binary over the top of lares.exe and nobody notices
+          # until the wrong program starts.
+          $dir = "$env:LOCALAPPDATA\Programs\Lares"
+          $fh = "$dir\lares-freehand.exe"
+          if (-not (Test-Path $fh)) { throw "lares-freehand.exe was not installed" }
+          & $fh --version
+          $walk = & $fh --plain --demo --recorded --budget 2 | Out-String
+          if ($walk -notmatch "the code the model wrote") {
+            Write-Host $walk
+            throw "the freehand walkthrough did not run"
+          }
+          if ((& $dir\lares.exe --version | Out-String) -notmatch "^Lares \d") {
+            throw "lares.exe was overwritten by another program"
+          }
+          Write-Host "both programs are installed and are different programs"
 
       - name: The PATH entry must survive with its variables intact
         shell: pwsh

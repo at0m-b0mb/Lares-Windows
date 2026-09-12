@@ -11,8 +11,11 @@ worse. No prompts, no dialogs, no cloud, no account.
 | **`lares-full-x64.exe`** | Terminal application **with the model already inside it**. One file, nothing to fetch, works offline forever. |
 | `lares-x64.exe` | Terminal application. Downloads a model the first time it wants one. |
 | `lares-desktop-x64.exe` | Desktop application. |
+| **`lares-freehand-full-x64.exe`** | **New.** The lane with no catalogue in it — the model writes every fix — with the model inside. |
+| `lares-freehand-x64.exe` | The same without a model. It refuses to run until it has one. |
 | **`lares-full-arm64.exe`** | Windows on ARM **with the model inside it** — including a VM on Apple Silicon. |
-| `lares-arm64.exe` · `lares-desktop-arm64.exe` | Windows on ARM, without the model. |
+| **`lares-freehand-full-arm64.exe`** | The freehand lane for Windows on ARM, with the model inside. |
+| `lares-arm64.exe` · `lares-desktop-arm64.exe` · `lares-freehand-arm64.exe` | Windows on ARM, without the model. |
 
 Check your download against `SHA256SUMS.txt` before running it.
 
@@ -20,6 +23,48 @@ Or let the installer choose, verify and put it on your PATH:
 
 ```powershell
 irm https://raw.githubusercontent.com/at0m-b0mb/Lares-Windows/main/install.ps1 | iex
+```
+
+## New in this release
+
+### `lares-freehand.exe` — no catalogue at all
+
+A separate program, because it answers the question that matters most about a
+tool like this — *who wrote the code that runs on your machine* — differently
+from `lares.exe`, and that is too large a difference to hide behind a flag.
+
+It reads the machine: installed software and versions, every listening TCP and
+UDP socket and who owns it, running services and their image paths, local
+accounts, and the settings that decide what is reachable. It hands that to the
+model, asks what is wrong, then asks for the PowerShell that fixes each thing —
+a check, a fix and an undo — and runs what the model wrote.
+
+```powershell
+lares-freehand --recorded    # read the whole lane through, no model needed
+lares-freehand --dry-run     # your machine, the real model, no changes
+lares-freehand               # let it act on what the model writes
+```
+
+What is still not the model's to decide is a blocklist of catastrophes —
+formatting a disk, deleting shadow copies, editing the boot configuration,
+`Invoke-Expression`, turning the firewall off, rebooting. The check script is
+screened too, because it runs before the fix and even in a dry run.
+
+**Two things worth reading before you run it.** The screen stops catastrophes,
+not mistakes: a model-written fix that is merely wrong will run. And the undo is
+written by the same model as the fix, so when the model is wrong about reversing
+its own change it is wrong in the same direction. Both scripts are kept verbatim
+in the journal. Take a VM snapshot first.
+
+### `--live` — watch it think
+
+Every exchange was already recorded, but only once it was over, and on four
+cores that is minutes of spinner. `--live` streams the conversation instead:
+what is sent, then the answer one token at a time as the model writes it.
+
+```powershell
+lares consult --live
+lares run --model-only --live
 ```
 
 ## Letting the model lead
@@ -71,12 +116,16 @@ and closing.
 
 ## Known limits, stated plainly
 
-**The engine is tested; the PowerShell is not.** 439 tests run on Windows and
-Linux across Python 3.10 and 3.12, and CI installs this release with
-`install.ps1` on a clean x64 and a clean ARM64 machine and runs the result. But no control in the catalogue has yet
-executed against a live Windows machine — every probe and remediation was written
-against Microsoft's documentation and exercised in demo mode, which fakes the
-PowerShell round trip.
+**The engine is tested. Most of the PowerShell has run once, on one machine.**
+482 tests run on Windows and Linux across Python 3.10 and 3.12, and CI installs
+this release with `install.ps1` on a clean x64 and a clean ARM64 machine and
+runs the result — including the freehand walkthrough, and a check that the
+freehand binary really has no catalogue in it.
+
+8 of the 30 controls have applied and verified against a live Windows 11 ARM64
+VM. The other 22 have never executed on real hardware: they were written against
+Microsoft's documentation, reviewed by hand, and exercised in demo mode, which
+fakes the PowerShell round trip.
 
 Try it on a machine you can afford to restore, and take a VM snapshot first.
 Findings from real hardware are the most useful thing anyone could contribute.

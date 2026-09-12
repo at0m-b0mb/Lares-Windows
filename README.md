@@ -48,8 +48,11 @@ language model inside it, so it works on a machine that has never been online.
 | **`lares-full-x64.exe`** | Terminal application **with the model embedded**. Nothing to fetch, ever. | ~1.1 GB |
 | `lares-x64.exe` | Terminal application. Fetches a model the first time it wants one. | ~45 MB |
 | `lares-desktop-x64.exe` | Desktop application. | ~90 MB |
+| **`lares-freehand-full-x64.exe`** | The no-catalogue lane **with the model embedded**: the model writes every fix. [What that means](#the-freehand-lane). | ~1.1 GB |
+| `lares-freehand-x64.exe` | The same, without a model. Refuses to run until it has one. | ~45 MB |
 | **`lares-full-arm64.exe`** | Windows on ARM, **with the model embedded**. | ~1.1 GB |
-| `lares-arm64.exe` · `lares-desktop-arm64.exe` | Windows on ARM, without the model. | ~12 / 27 MB |
+| `lares-arm64.exe` · `lares-desktop-arm64.exe` · `lares-freehand-arm64.exe` | Windows on ARM, without the model. | ~12 / 27 / 12 MB |
+| **`lares-freehand-full-arm64.exe`** | The no-catalogue lane for ARM, with the model. | ~1.1 GB |
 
 Get them from the [latest release](https://github.com/at0m-b0mb/Lares-Windows/releases/latest).
 Every file is listed in `SHA256SUMS.txt`; check yours before running it.
@@ -99,14 +102,16 @@ lares run
 Double-clicking `lares.exe` in Explorer opens a menu instead of flashing a usage
 message at you and closing.
 
-## Two applications
+## Three applications
 
-Same engine, two front doors. Neither needs the other.
+Two front doors onto the same engine, and one program that answers the central
+question differently. None of them needs the others.
 
 | | |
 |---|---|
 | **`lares.exe`** | Terminal. Uses colour when `rich` is available and plain text when it is not, because a machine with nothing installed is exactly the machine that most needs hardening. `lares watch` is the agent with no window. |
 | **`lares-desktop.exe`** | Desktop. Starts working the moment it opens and keeps working whether you look at it or not. |
+| **`lares-freehand.exe`** | No catalogue. It reads the machine, asks the model what is wrong, and runs the PowerShell the model writes back. A different trust model, deliberately a different program — see [The freehand lane](#the-freehand-lane). |
 
 <div align="center">
 
@@ -171,6 +176,42 @@ model the sole decision-maker: its answer is the whole plan, nothing is
 appended to it, and if it cannot answer then nothing is changed rather than
 the built-in planner quietly deciding instead.
 
+### Watching it think
+
+Every exchange is recorded, but only once it is over — and on four cores a
+reply is a minute, a consultation several. For all of that time a spinner is
+indistinguishable from a hang.
+
+`--live` replaces it with the conversation itself: what is being sent, then
+the answer one token at a time as the model produces it.
+
+```powershell
+lares consult --live          # the model leads, and you watch it lead
+lares run --model-only --live # the model decides alone, in the open
+lares plan --live
+lares ask "why is SMB signing off" --live
+```
+
+```
+sent to the model ----------------------------------------------------------
+THE RULES IT IS WORKING UNDER
+    You are inspecting one Windows machine. You decide what to look at...
+WHAT IT IS BEING TOLD
+    Checks available, in domains defence, identity, network, services, system:
+      NET-005  [network] LLMNR is enabled
+      ...
+ITS ANSWER, AS IT IS WRITTEN
+    {"ask": {"facts": true, "domains": ["network"]}, "why": "Start with what
+     this machine is and what it exposes..."
+  Took                   47.3s at 2.6 tokens/s
+```
+
+Nothing about the exchange changes — same prompt, same reply, same record
+afterwards. It is streamed rather than awaited, which is why you can read it
+as it arrives. The system prompt is printed once and not reprinted between
+rounds, because five hundred tokens of unchanged rules between every question
+buries the part that actually changed.
+
 ### Seeing it work
 
 `lares demo` walks through one full round trip and shows the working at every
@@ -203,6 +244,104 @@ real `Executor` to apply it — the same functions `lares run` calls, and the
 test suite asserts it keeps doing so. A walkthrough that reimplemented the
 pipeline would be worse than none: it could agree today and drift next month,
 and you would have no way to tell.
+
+## The freehand lane
+
+> **`lares-freehand.exe` has no catalogue in it.** It reads your machine, asks
+> the model what is wrong, and runs the PowerShell the model writes back. It is
+> a separate program from `lares.exe` on purpose: the two give different answers
+> to the question that matters most about a tool like this — *who wrote the code
+> that runs on your machine* — and that is too large a difference to hide behind
+> a flag.
+
+```powershell
+lares-freehand --recorded     # read the whole lane through, no model needed
+lares-freehand --dry-run      # your real machine, real model, no changes
+lares-freehand                # let it act on what the model writes
+```
+
+### What it does
+
+```
+reads     six read-only surveys - installed software and versions, every
+          listening TCP and UDP socket and who owns it, running services,
+          local accounts, and the settings that decide what is reachable
+asks      "here is the machine. what is wrong with it?"
+asks      "write the check, the fix and the undo for this one"
+screens   refuses a short list of catastrophes
+checks    runs the model's own check - already in that state? then nothing
+applies   runs the model's fix
+verifies  runs the model's check again
+decides   keeps it, or runs the model's undo, now
+records   journal, transcript, log - so lares journal and lares undo work
+```
+
+Everything is printed as it happens: the survey, the exact prompt, the reply
+arriving one token at a time, the three scripts, the screen's verdict, every
+stage of applying them.
+
+### What the survey reads
+
+| | |
+|---|---|
+| **software** | every installed product and its version, from all three uninstall keys |
+| **ports** | every listening TCP and UDP socket, the owning process, and whether it is bound to every interface or only to localhost |
+| **services** | every running service, the account it runs as, and its image path — unquoted paths with spaces are flagged, because that is a local administrator in one step |
+| **accounts** | local users, which are enabled, which are administrators |
+| **exposure** | RDP and whether it requires NLA, WinRM, SMBv1 and signing, firewall profiles, UAC, automatic logon, LLMNR, Defender, disk encryption |
+| **system** | edition, build and patch level, domain membership |
+
+None of it has an opinion. Two fields are derived — *this socket is bound to
+0.0.0.0*, *this path has a space and no quotes* — and those are facts about the
+reading, no different from the port number. The model is the only thing that
+says whether any of it matters.
+
+### What is still not the model's to decide
+
+One thing: a blocklist of operations that will not run whoever wrote them.
+Formatting a volume, clearing a disk, deleting shadow copies, editing the boot
+configuration, downloading and executing code, `Invoke-Expression`, base64
+`-EncodedCommand`, turning the firewall off entirely, deleting accounts,
+rebooting without warning.
+
+The check script is screened too, and that is not a formality — it runs before
+the fix and it runs even in a dry run, so "it is only a check" is a claim by the
+same model that wrote it. The undo is screened on the catastrophic rules only,
+for the same reason a catalogue rollback is: putting a setting back can
+legitimately mean switching something on again.
+
+### Two things worth saying plainly
+
+**The screen stops catastrophes, not mistakes.** It will refuse a script that
+formats `C:`. It will not refuse one that is merely wrong — that sets the wrong
+value, or breaks an application nobody told the model about. Nothing can, because
+deciding whether arbitrary PowerShell is safe is not a decidable problem, and any
+tool claiming otherwise is lying to you on its way to running the script.
+
+**The undo is written by the same model as the fix.** When the model is good,
+this lane is genuinely reversible: the change is verified by the model's own
+check and put back on the spot if it fails. When the model is wrong about how to
+reverse its own change, it is wrong in the same direction. Both scripts are kept
+verbatim in the journal so a person can read what ran and what was meant to undo
+it. **Take a VM snapshot before letting this one change anything.**
+
+### Getting it
+
+```powershell
+# piping into iex cannot take arguments, so download it and run it with them
+irm https://raw.githubusercontent.com/at0m-b0mb/Lares-Windows/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Freehand -Full
+```
+
+Or download `lares-freehand-full-x64.exe` (or `-arm64`) from [Releases][rel] —
+one file, the model inside it, nothing to install. It refuses to run without a
+model, because it has nothing to fall back on and will not pretend otherwise.
+
+The binary is built without the catalogue in it. That is a property of the file
+rather than a promise about it: the release job fails if a control id can be
+found anywhere in its output.
+
+[rel]: https://github.com/at0m-b0mb/Lares-Windows/releases/latest
 
 ## Why you can leave it running
 
@@ -328,6 +467,10 @@ a change that needs a restart to reveal its effect.
 
 ## What it will not do
 
+This is about `lares.exe` and `lares-desktop.exe`. `lares-freehand.exe` is a
+different program with a different answer to the first item, which is why it is
+a different program — see [The freehand lane](#the-freehand-lane).
+
 - Run any script the model wrote. The Expert lane (`lares ask`) has the model
   author PowerShell freely, runs it past a static screen, prints it, and stops.
   Executing it is your decision and your keystroke.
@@ -337,8 +480,10 @@ a change that needs a restart to reveal its effect.
   remote operator is locked out and cannot tell us".
 - Format a volume, clear a disk, delete shadow copies, edit the boot
   configuration, disable a network adapter, turn off Defender, delete a user,
-  reboot, or pipe a download into `Invoke-Expression`. These are refused in the
-  catalogue and in the Expert lane, by pattern, before anything runs.
+  reboot, or pipe a download into `Invoke-Expression`. These are refused by
+  pattern before anything runs — in the catalogue, in the Expert lane, and in
+  the freehand lane, which is the one thing that lane does not leave to the
+  model.
 - Delete a stored credential and claim it can put it back. `IDN-004` clears a
   clear-text autologon password and is marked irreversible, because keeping a
   copy of a password in order to restore it is not something this will do.
@@ -347,23 +492,31 @@ a change that needs a restart to reveal its effect.
 
 ## Status, stated plainly
 
-**v0.4.1. The engine is tested; the PowerShell is not.**
+**v0.5.0. The engine is tested. Most of the PowerShell has run once, on one machine.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **439 tests** that run on Windows
+loader, the logging, the theme — is covered by **482 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
-What has **not** happened is any of the thirty controls executing against a live
-Windows machine. Every probe and remediation was written against Microsoft's
-documentation and reviewed by hand, and every one is exercised in demo mode,
-which fakes the PowerShell round trip. The shapes are right and the logic around
-them is right, but a cmdlet that behaves differently on Windows 11 24H2 than the
-documentation says would not have been caught yet.
+The PowerShell is a different matter, and the honest position has three parts:
+
+- **8 of the 30 controls** have applied and verified against a live Windows 11
+  ARM64 VM. Those ran, changed the machine, passed their own re-check, and were
+  journalled.
+- **The other 22 have never executed on real hardware.** They were written
+  against Microsoft's documentation, reviewed by hand, and exercised in demo
+  mode, which fakes the PowerShell round trip. The shapes are right; a cmdlet
+  that behaves differently on 24H2 than the documentation says would not have
+  been caught yet.
+- **The freehand lane is newer than any of that.** Its engine is tested, and
+  what it runs is written fresh by a model each time, so there is nothing to
+  pre-verify — which is exactly why it screens, checks, verifies and undoes.
 
 Treat this release as ready to try on a machine you can afford to restore. Start
 with `lares scan`, read `lares plan`, and use `--dry-run` if you want the whole
-cycle with nothing changed. Findings from real hardware are the most useful thing
-anyone could contribute.
+cycle with nothing changed. For the freehand lane, `--recorded` reads it through
+without a model and `--dry-run` shows you the scripts before any of them run.
+Findings from real hardware are the most useful thing anyone could contribute.
 
 ## The catalogue
 
@@ -392,12 +545,20 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-439 tests, none of which need Windows. They cover the guard against injection
+482 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay
 including corrupted and truncated payloads, and every text pairing in both themes
 against WCAG AA.
+
+The freehand lane carries its own set, because with no catalogue the things
+worth proving are different ones: that a check saying `NOTFIXED` can never be
+read as success (`FIXED` is a substring of it, and the wrong test order would
+leave changes in place on the strength of the check that said they failed),
+that a fix which fails to verify is put back, that a failed undo is recorded as
+*still on this machine* rather than as undone, and that the walkthrough goes
+through the real agent instead of a second arrangement of it.
 
 ## Development notes
 

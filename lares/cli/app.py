@@ -37,7 +37,7 @@ from ..sense import scanner
 from ..version import VERSION
 from ..winsys import current_user, is_demo, is_elevated, set_demo
 from .render import Console
-from . import interactive
+from . import interactive, live as live_mod
 
 SEVERITY_ORDER = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM,
                   Severity.LOW, Severity.INFO]
@@ -71,6 +71,25 @@ def _settings_from(args: argparse.Namespace,
         if console is not None:
             console.warn(correction)
     return settings
+
+
+def _watch_model(args: argparse.Namespace, agent: Any, console: Console) -> bool:
+    """Attach the live view to whatever engine this agent ended up with.
+
+    Returns whether anything is being watched, which is False when --live was
+    not given and also when it was but there is no model to watch - a cycle
+    served by the built-in planner has no conversation to show, and saying so
+    is better than printing nothing and letting it look broken.
+    """
+    if not getattr(args, "live", False):
+        return False
+    engine = getattr(agent, "engine", None)
+    if engine is None:
+        console.warn("--live has nothing to show: this run has no model, so "
+                     "the built-in planner is deciding.")
+        return False
+    engine.watch = live_mod.watch(console)
+    return True
 
 
 def _banner(console: Console, settings: config_mod.Settings, note: str) -> None:
@@ -159,12 +178,16 @@ def cmd_plan(args: argparse.Namespace, console: Console) -> int:
     note = decision.reason if decision.spec else "no model"
     _banner(console, settings, engine.status if decision.spec else note)
 
+    watching = bool(getattr(args, "live", False))
+    if watching:
+        engine.watch = live_mod.watch(console)
+
     with console.status("Checking the machine") as status:
         scan = scanner.scan(catalog, domains=settings.domains or None,
                             progress=lambda cid, i, n: status(f"Checking {cid} ({i}/{n})"))
 
     console.field("Findings", str(len(scan.findings)))
-    with console.status("Deciding what to do"):
+    with live_mod.progress(console, watching, "Deciding what to do"):
         planner = Planner(catalog, engine)
         plan = planner.plan(scan, ceiling=settings.risk_ceiling,
                             elevated=is_elevated(), budget=settings.budget,
@@ -209,6 +232,7 @@ def cmd_run(args: argparse.Namespace, console: Console) -> int:
     agent, note = build(settings, catalog, listener=_make_listener(console),
                         with_model=not args.no_model)
     _banner(console, settings, note)
+    _watch_model(args, agent, console)
 
     if agent.breaker.open:
         console.warn(agent.breaker.explain())
@@ -229,6 +253,7 @@ def cmd_watch(args: argparse.Namespace, console: Console) -> int:
     agent, note = build(settings, catalog, listener=_make_listener(console),
                         with_model=not args.no_model)
     _banner(console, settings, note)
+    _watch_model(args, agent, console)
     console.ok(f"Running every {settings.interval_minutes} minutes. Ctrl-C to stop.")
     console.blank()
 
@@ -401,12 +426,16 @@ def cmd_ask(args: argparse.Namespace, console: Console) -> int:
         console.dim("Download a model first:  lares model --download")
         return 1
 
+    watching = bool(getattr(args, "live", False))
+    if watching:
+        engine.watch = live_mod.watch(console)
+
     scan = None
     if args.context:
         with console.status("Reading the machine for context"):
             scan = scanner.scan(loader.load())
 
-    with console.status(f"Asking {engine.name}"):
+    with live_mod.progress(console, watching, f"Asking {engine.name}"):
         reply = engine.ask(EXPERT_SYSTEM, expert(args.question, scan),
                            max_tokens=1400, temperature=0.3)
 
@@ -415,6 +444,9 @@ def cmd_ask(args: argparse.Namespace, console: Console) -> int:
         return 1
 
     script = strip_fence(reply.text)
+    console.blank()
+    if watching:
+        console.section("The same script, with the code fences taken off")
     console.script(script)
     console.blank()
 
@@ -545,13 +577,18 @@ def cmd_consult(args: argparse.Namespace, console: Console) -> int:
         "inference pass, so this takes a few minutes on a slow machine.")
     console.blank()
 
+    watching = bool(getattr(args, "live", False))
+    if watching:
+        engine.watch = live_mod.watch(console)
+        console.dim("  Live: every word sent and every word returned is below.")
+
     consultant = Consultant(catalog, engine, max_rounds=args.rounds)
-    with console.status("Consulting") as status:
+    with live_mod.progress(console, watching, "Consulting") as report:
         result = consultant.run(
             ceiling=settings.risk_ceiling,
             elevated=is_elevated(),
             budget=settings.budget,
-            progress=status,
+            progress=report,
         )
 
     console.section("How it investigated")
@@ -772,6 +809,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="let the model be the only thing that decides; "
                             "change nothing at all if it cannot answer")
 
+    def watchable(p: argparse.ArgumentParser) -> None:
+        """For commands that put something to the model.
+
+        Deliberately not part of common(): scan never asks the model, and a
+        flag that silently does nothing is worse than one that is absent.
+        """
+        p.add_argument("--live", action="store_true",
+                       help="show the conversation with the model as it "
+                            "happens, one token at a time")
+
     p = sub.add_parser("scan", help="look at the machine and report")
     common(p)
     p.add_argument("-v", "--verbose", action="store_true", help="show evidence and unredacted facts")
@@ -781,11 +828,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("plan", help="show what it would do, and why")
     common(p)
+    watchable(p)
     p.add_argument("--model-tier", help="force a model tier")
     p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("run", help="one full cycle: scan, decide, fix, verify")
     common(p)
+    watchable(p)
     p.add_argument("--model-tier", help="force a model tier")
     p.add_argument("--no-model", action="store_true", help="use the built-in planner")
     p.add_argument("--report", metavar="PATH", help="write a report afterwards")
@@ -793,6 +842,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("watch", help="run cycles on a schedule until stopped")
     common(p)
+    watchable(p)
     p.add_argument("--interval-minutes", type=int, help="minutes between cycles")
     p.add_argument("--model-tier", help="force a model tier")
     p.add_argument("--no-model", action="store_true", help="use the built-in planner")
@@ -816,6 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ask", help="have the model write a script for you to read")
     p.add_argument("question")
+    watchable(p)
     p.add_argument("--context", action="store_true", help="include machine facts")
     p.set_defaults(func=cmd_ask)
 
@@ -833,6 +884,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("consult",
                        help="let the model lead: it asks what to look at, then decides")
     common(p)
+    watchable(p)
     p.add_argument("--rounds", type=int, default=3,
                    help="how many times it may ask before it must answer (default 3)")
     p.add_argument("--apply", action="store_true",

@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .models import Choice, ModelSpec, choose
 
@@ -51,6 +51,52 @@ class Reply:
         return self.tokens / self.seconds if self.seconds > 0 else 0.0
 
 
+@dataclass
+class Watch:
+    """Somewhere to send an exchange while it is still happening.
+
+    Every exchange is already written to the transcript, but only once it is
+    over, and on the hardware this targets "over" is two or three minutes
+    later. For that whole time a spinner is indistinguishable from a hang, and
+    someone who wants to see the application talk to the model is instead
+    watching a dot move.
+
+    Attaching one of these to the Engine changes nothing about the answer. The
+    same text is produced; it is assembled here, a token at a time, instead of
+    inside llama.cpp. Because the Engine is the single object the planner, the
+    consultation and the agent all share, attaching it in one place makes every
+    exchange visible without a flag threaded through five call sites.
+
+    Every callback is display. None of them may change the outcome, and a
+    callback that raises is discarded rather than allowed to lose a reply that
+    took minutes to produce - a console that cannot encode a character is not
+    a reason to throw away the answer.
+    """
+
+    #: The system prompt and the user message, before generation starts.
+    on_prompt: Callable[[str, str], None] | None = None
+    #: One fragment of the reply, as it is produced. Usually one token.
+    on_token: Callable[[str], None] | None = None
+    #: The finished Reply, successful or not.
+    on_reply: Callable[["Reply"], None] | None = None
+
+
+class _Shape(Exception):
+    """The backend returned something this code does not understand."""
+
+
+def _safely(call: Callable[..., Any], *args: Any) -> None:
+    """Run a watcher callback, absorbing anything it does.
+
+    Deliberately silent. The alternative - logging every failed write - turns
+    one broken console into thousands of log lines, one per token.
+    """
+    try:
+        call(*args)
+    except Exception:  # noqa: BLE001 - display must never break generation
+        pass
+
+
 class Engine:
     """A lazily-loaded local model."""
 
@@ -62,6 +108,8 @@ class Engine:
         self._llama: Any = None
         self._lock = threading.Lock()
         self._load_error = ""
+        #: Set to a Watch to have exchanges reported as they happen.
+        self.watch: Watch | None = None
 
     # -- construction ---------------------------------------------------
 
@@ -165,6 +213,7 @@ class Engine:
         max_tokens: int = PLAN_TOKENS,
         schema: dict[str, Any] | None = None,
         temperature: float = TEMPERATURE,
+        _echoed: bool = False,
     ) -> Reply:
         """One chat completion.
 
@@ -173,9 +222,21 @@ class Engine:
         On a 1.5B model this is the difference between usable and useless: it
         removes the entire class of failure where the model writes a fine plan
         wrapped in prose, or forgets a closing brace four hundred tokens in.
+
+        With a Watch attached the reply is streamed instead of awaited, and
+        each fragment is handed over as it appears. The result is the same
+        object either way, so nothing downstream can tell which path ran.
+
+        *_echoed* is private: a schema the backend rejects is retried without
+        one, and the prompt must not be reported to the watcher twice for what
+        is one exchange from every other point of view.
         """
         if not self.load():
             return Reply("", ok=False, error=self.status)
+
+        watch = self.watch
+        if watch is not None and watch.on_prompt is not None and not _echoed:
+            _safely(watch.on_prompt, system, user)
 
         kwargs: dict[str, Any] = {
             "messages": [
@@ -190,9 +251,17 @@ class Engine:
         if schema is not None:
             kwargs["response_format"] = {"type": "json_object", "schema": schema}
 
+        live = watch is not None and watch.on_token is not None
         started = time.monotonic()
         try:
-            result = self._llama.create_chat_completion(**kwargs)
+            if live:
+                text, used = self._streamed(kwargs, watch.on_token)  # type: ignore[arg-type]
+            else:
+                text, used = self._whole(kwargs)
+        except _Shape:
+            return self._told(watch, Reply(
+                "", ok=False, error="model returned an unexpected shape",
+                seconds=time.monotonic() - started))
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             if schema is not None:
@@ -200,23 +269,60 @@ class Engine:
                 # Retrying unconstrained is much better than failing the cycle;
                 # the parser downstream is written to cope with loose output.
                 return self.ask(system, user, max_tokens=max_tokens, schema=None,
-                                temperature=temperature)
-            return Reply("", ok=False, error=message[:300],
-                         seconds=time.monotonic() - started)
+                                temperature=temperature, _echoed=True)
+            return self._told(watch, Reply(
+                "", ok=False, error=message[:300],
+                seconds=time.monotonic() - started))
 
-        elapsed = time.monotonic() - started
+        return self._told(watch, Reply(
+            text.strip(), ok=True, tokens=used,
+            seconds=time.monotonic() - started))
+
+    def _whole(self, kwargs: dict[str, Any]) -> tuple[str, int]:
+        """Generate, and wait for all of it."""
+        result = self._llama.create_chat_completion(**kwargs)
         try:
             text = result["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError):
-            return Reply("", ok=False, error="model returned an unexpected shape",
-                         seconds=elapsed)
+        except (KeyError, IndexError, TypeError) as exc:
+            raise _Shape() from exc
 
         used = 0
         usage = result.get("usage") if isinstance(result, dict) else None
         if isinstance(usage, dict):
             used = int(usage.get("completion_tokens", 0) or 0)
+        return text, used
 
-        return Reply(text.strip(), ok=True, tokens=used, seconds=elapsed)
+    def _streamed(self, kwargs: dict[str, Any],
+                  on_token: Callable[[str], None]) -> tuple[str, int]:
+        """Generate, handing over each fragment as it arrives.
+
+        The token count is the number of content fragments rather than a usage
+        figure, because llama.cpp reports no usage on a streamed completion.
+        One fragment is one token, so the tokens-per-second this yields is the
+        real rate and not an estimate presented as one.
+
+        Chunks that carry no text - the opening role chunk, the closing finish
+        chunk - are skipped rather than treated as a malformed response, which
+        is why a shape that is merely uninteresting does not raise here.
+        """
+        parts: list[str] = []
+        for chunk in self._llama.create_chat_completion(**dict(kwargs, stream=True)):
+            try:
+                delta = chunk["choices"][0]["delta"].get("content")
+            except (KeyError, IndexError, TypeError, AttributeError):
+                continue
+            if not delta:
+                continue
+            parts.append(delta)
+            _safely(on_token, delta)
+        return "".join(parts), len(parts)
+
+    @staticmethod
+    def _told(watch: Watch | None, reply: Reply) -> Reply:
+        """Report the finished exchange, then hand it back unchanged."""
+        if watch is not None and watch.on_reply is not None:
+            _safely(watch.on_reply, reply)
+        return reply
 
 
 # --------------------------------------------------------------------------

@@ -24,10 +24,22 @@
 
 .PARAMETER Full
     Download the large single file with the model already inside it (about
-    1.1 GB) rather than the small one that fetches a model later. x64 only.
+    1.1 GB) rather than the small one that fetches a model later. Built for
+    both x64 and ARM64, though the ARM64 one exists only when its model
+    backend compiled in CI.
 
 .PARAMETER Desktop
     Also install the desktop application.
+
+.PARAMETER Freehand
+    Also install lares-freehand.exe, the lane with no catalogue in it: it
+    reads the machine, asks the model what is wrong, and runs the PowerShell
+    the model writes back. It is useless without a model, so pair it with
+    -Full unless you already have one downloaded.
+
+    Note that -Full -Freehand downloads the model twice, once inside each
+    executable, which is about 2.2 GB. There is no way around that: the model
+    is carried inside the file, which is the point of those builds.
 
 .PARAMETER StartWithWindows
     Register a scheduled task so the agent runs at logon. Needs administrator.
@@ -49,6 +61,7 @@
 param(
     [switch]$Full,
     [switch]$Desktop,
+    [switch]$Freehand,
     [switch]$StartWithWindows,
     [string]$Version = "latest",
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\Lares"
@@ -162,6 +175,14 @@ $exeName = if ($Full) { "lares-full-$arch.exe" } else { "lares-$arch.exe" }
 
 $wanted = @($exeName)
 if ($Desktop) { $wanted += "lares-desktop-$arch.exe" }
+if ($Freehand) {
+    $wanted += if ($Full) { "lares-freehand-full-$arch.exe" } else { "lares-freehand-$arch.exe" }
+    if (-not $Full) {
+        Write-Warn ("lares-freehand.exe does nothing without a model - it has " +
+                    "no catalogue to fall back on. Run 'lares model --download' " +
+                    "afterwards, or use -Full to get one inside the file.")
+    }
+}
 
 if ($WhatIfPreference) {
     Write-Host ""
@@ -215,9 +236,14 @@ try {
         }
         Write-Ok "$name matches its published hash"
 
-        # Whichever variant was downloaded is installed as lares.exe, so the
-        # command you type is the same either way.
-        $installedName = if ($name -like "lares-desktop-*") { "lares-desktop.exe" } else { "lares.exe" }
+        # Whichever variant of a program was downloaded is installed under that
+        # program's plain name, so the command you type does not depend on
+        # which build you chose. The freehand test has to come first: its full
+        # variant is called lares-freehand-full-x64.exe, which matches the
+        # pattern for the ordinary full build as well.
+        $installedName = if ($name -like "lares-freehand-*") { "lares-freehand.exe" }
+                         elseif ($name -like "lares-desktop-*") { "lares-desktop.exe" }
+                         else { "lares.exe" }
         $destination = Join-Path $InstallDir $installedName
         try {
             Copy-Item $target $destination -Force
@@ -331,8 +357,21 @@ Write-Note "What is wrong, change nothing: lares scan"
 Write-Note "What would it do, and why:     lares plan"
 Write-Note "Let it fix things:             lares run"
 Write-Note "Leave it running:              lares watch"
+Write-Note "Watch it talk to the model:    lares consult --live"
+if ($Freehand) {
+    Write-Host ""
+    Write-Note "The freehand lane - no catalogue, the model writes every fix:"
+    Write-Note "  Read it through first:       lares-freehand --recorded"
+    Write-Note "  See what it would do:        lares-freehand --dry-run"
+    Write-Note "  Let it act on what it says:  lares-freehand"
+}
 Write-Host ""
 Write-Warn "Start with 'lares scan' and read it before letting it change anything."
+if ($Freehand) {
+    Write-Warn ("lares-freehand.exe runs PowerShell the model wrote. Nothing in " +
+                "it was reviewed in advance, and its undo was written by the " +
+                "same model. Take a snapshot before letting it change anything.")
+}
 Write-Note "Applying fixes needs an elevated prompt. In a VM, take a snapshot first."
 Write-Note "Windows will warn that the file is unsigned - these builds are not"
 Write-Note "code-signed. Check the SHA-256 against SHA256SUMS.txt if in doubt."

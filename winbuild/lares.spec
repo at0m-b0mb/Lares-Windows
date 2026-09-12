@@ -1,9 +1,10 @@
-# PyInstaller spec for both Lares executables.
+# PyInstaller spec for all three Lares executables.
 #
-# Builds two programs from one spec so they cannot drift apart:
+# Builds three programs from one spec so they cannot drift apart:
 #
-#   lares.exe          the terminal application, console subsystem
-#   lares-desktop.exe  the desktop application, windowed subsystem
+#   lares.exe           the terminal application, console subsystem
+#   lares-desktop.exe   the desktop application, windowed subsystem
+#   lares-freehand.exe  the lane with no catalogue, console subsystem
 #
 # Both are onefile. That is the whole point of shipping a binary here - the
 # person running it should not have to think about Python, pip, a virtual
@@ -29,8 +30,8 @@ ROOT = Path(SPECPATH).resolve().parent
 # The catalogue is data, not code, and the executor can only ever run what is
 # in it - so if these files do not make it into the bundle, the program starts
 # and then refuses to do anything. Worth being explicit about.
-datas = [
-    (str(ROOT / "lares" / "catalog" / "controls"), "lares/catalog/controls"),
+CATALOGUE = [(str(ROOT / "lares" / "catalog" / "controls"), "lares/catalog/controls")]
+datas = CATALOGUE + [
     (str(ROOT / "assets" / "lares.ico"), "assets"),
 ]
 
@@ -98,12 +99,12 @@ if not _HAS_BACKEND:
 block_cipher = None
 
 
-def analysis(entry: str, extra_excludes=()) -> Analysis:
+def analysis(entry: str, extra_excludes=(), extra_datas=None) -> Analysis:
     return Analysis(
         [str(ROOT / entry)],
         pathex=[str(ROOT)],
         binaries=binaries,
-        datas=datas,
+        datas=datas if extra_datas is None else extra_datas,
         hiddenimports=hiddenimports,
         hookspath=[],
         runtime_hooks=[],
@@ -129,6 +130,42 @@ console_exe = EXE(
     console_a.datas,
     [],
     name="lares",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    runtime_tmpdir=None,
+    console=True,
+    icon=str(ROOT / "assets" / "lares.ico"),
+    version=str(ROOT / "winbuild" / "version_info.txt"),
+)
+
+# -- the freehand application ---------------------------------------------
+# Built without the catalogue, on purpose. This program's whole claim is that
+# nothing it runs was written in advance, and the cheapest way to keep that
+# claim true is for the pre-written remediations not to be in the file at all.
+# Nothing in its import graph reads them - the loader is imported, which costs
+# nothing, and load() is never called - so leaving them out is a property of
+# the binary rather than a promise about it.
+freehand_a = analysis(
+    "lares-freehand.py",
+    extra_excludes=["PyQt6", "PyQt5", "PySide6"],
+    # Everything the other builds carry except the catalogue. Written as a
+    # subtraction rather than a fresh list on purpose: llama_cpp's data files
+    # are appended to datas above, and a hand-written list here would have
+    # quietly shipped a freehand binary whose model backend could not load -
+    # which is the one thing this program cannot do without.
+    extra_datas=[item for item in datas if item not in CATALOGUE],
+)
+freehand_pyz = PYZ(freehand_a.pure, freehand_a.zipped_data, cipher=block_cipher)
+freehand_exe = EXE(
+    freehand_pyz,
+    freehand_a.scripts,
+    freehand_a.binaries,
+    freehand_a.zipfiles,
+    freehand_a.datas,
+    [],
+    name="lares-freehand",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
