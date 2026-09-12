@@ -42,7 +42,16 @@ class Replay:
 
     def ask(self, system: str, user: str, *, max_tokens: int = 0,
             schema: dict[str, Any] | None = None,
-            temperature: float = 0.0) -> Reply:
+            temperature: float = 0.0,
+            repeat_penalty: float = 0.0) -> Reply:
+        """Answer from the script.
+
+        Every sampler setting is accepted and ignored, which is honest rather
+        than lazy: there is no sampler here to apply them to. What matters is
+        that the signature keeps up with Engine's, because a Replay that cannot
+        be called the way the real thing is called is not standing in for it -
+        and a test asserts exactly that so it cannot drift again.
+        """
         self.asked.append((system, user))
         watch = self.watch
         if watch is not None and watch.on_prompt is not None:

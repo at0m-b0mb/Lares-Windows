@@ -67,6 +67,24 @@ lares consult --live
 lares run --model-only --live
 ```
 
+### Small models, and what they do when they are out of their depth
+
+A 1.5B asked to write prose will sometimes find a sentence it likes and repeat
+it until its token budget is gone — a release build caught one saying the same
+thing forty-five times inside a single JSON string, never reaching the part of
+the answer that mattered. Four things changed because of it:
+
+- every string the model writes is **bounded in the schema**, so where the
+  backend compiles that into a grammar the limit is enforced by the sampler;
+- the findings are **asked for before the summary**, so if the model does lose
+  itself in prose it does so *after* the part worth having;
+- a reply that **ran out of room is recovered** rather than discarded — rewound
+  to the last complete point and closed — though a reply cut off before
+  anything completed is still refused, because an empty object reads as a
+  confident "nothing is wrong with this machine";
+- and a model that gets stuck is **told apart from malformed output**, because
+  those have different causes and different answers.
+
 ## Letting the model lead
 
 `lares run` hands the model a scan and asks it to choose. `lares consult`

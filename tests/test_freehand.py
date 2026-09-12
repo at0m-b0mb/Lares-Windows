@@ -388,6 +388,22 @@ def test_a_fenced_script_is_unfenced(machine, tmp_path):
 # The live view
 # --------------------------------------------------------------------------
 
+def test_the_replay_can_be_called_every_way_the_engine_can():
+    """A stand-in that cannot be called the way the real thing is called is
+    not standing in for it. Caught for real: adding a sampler argument to
+    Engine.ask broke every walkthrough and nothing said so until the suite
+    ran."""
+    import inspect
+
+    from lares.brain.engine import Engine
+
+    real = inspect.signature(Engine.ask).parameters
+    stand_in = inspect.signature(Replay.ask).parameters
+    missing = [name for name in real
+               if not name.startswith("_") and name not in stand_in]
+    assert not missing, f"Replay.ask cannot accept {missing}"
+
+
 def test_the_replay_streams_through_the_same_watch_the_engine_uses(machine):
     seen: list[str] = []
     engine = Replay(["hello world"], pace=0)
@@ -528,3 +544,59 @@ def test_recorded_can_never_change_a_machine(capsys):
     out = walkthrough(capsys, "--budget", "2")
     assert "Nothing on this machine was changed" in out
     assert "decided, not applied" in out
+
+
+def test_a_model_stuck_repeating_itself_is_told_apart_from_bad_json(machine, tmp_path):
+    """Caught in a release build: a 1.5B said the same sentence forty-five
+    times inside one JSON string and never reached the part that mattered.
+
+    "Not usable JSON" is true of that and useless to whoever reads it. The two
+    have different causes and different answers - one is a parsing problem, the
+    other is a model too small for the question.
+    """
+    loop = '{"summary": "' + "The machine is not running useful software. " * 45
+    brain, _ = agent([loop], tmp_path)
+    _, issues, error = brain.assess(machine)
+    assert not issues
+    assert "stuck repeating itself" in error
+    assert "3b" in error, "it should say what to do about it"
+
+
+def test_ordinary_bad_json_still_says_so(machine, tmp_path):
+    brain, _ = agent(["I would start with the firewall."], tmp_path)
+    _, _, error = brain.assess(machine)
+    assert "not usable JSON" in error
+
+
+def test_the_issues_are_asked_for_before_the_summary():
+    """Property order is generation order.
+
+    If the model loses itself in prose it should lose itself after the part
+    worth having, so that even a truncated reply parses back into findings.
+    """
+    from lares.brain.freehand import ASSESS_SCHEMA, ASSESS_SYSTEM
+
+    keys = list(ASSESS_SCHEMA["properties"])
+    assert keys.index("issues") < keys.index("summary")
+    assert ASSESS_SYSTEM.index('"issues"') < ASSESS_SYSTEM.index('"summary"'), \
+        "the prompt must show the same order the schema generates in"
+
+
+def test_every_string_the_model_writes_is_bounded():
+    """The only thing that reliably stops a small model writing forever is the
+    grammar, and the grammar only bounds what the schema bounds."""
+    from lares.brain.freehand import ASSESS_SCHEMA, REMEDY_SCHEMA
+
+    def strings(node):
+        if isinstance(node, dict):
+            if node.get("type") == "string":
+                yield node
+            for value in node.values():
+                yield from strings(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from strings(item)
+
+    for schema in (ASSESS_SCHEMA, REMEDY_SCHEMA):
+        for field in strings(schema):
+            assert "maxLength" in field, f"unbounded string: {field}"

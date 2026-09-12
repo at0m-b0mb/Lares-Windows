@@ -492,7 +492,7 @@ a different program — see [The freehand lane](#the-freehand-lane).
 
 ## Status, stated plainly
 
-**v0.5.0. The engine is tested. Most of the PowerShell has run once, on one machine.**
+**v0.5.1. The engine is tested. Most of the PowerShell has run once, on one machine.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
 loader, the logging, the theme — is covered by **482 tests** that run on Windows
@@ -511,6 +511,10 @@ The PowerShell is a different matter, and the honest position has three parts:
 - **The freehand lane is newer than any of that.** Its engine is tested, and
   what it runs is written fresh by a model each time, so there is nothing to
   pre-verify — which is exactly why it screens, checks, verifies and undoes.
+  The embedded 1.5B is the smallest model that can do this job at all, and it
+  will sometimes fail to produce a usable answer; the lane says so and changes
+  nothing rather than guessing. `lares model --tier 3b --download` is a
+  noticeable improvement if you have the memory for it.
 
 Treat this release as ready to try on a machine you can afford to restore. Start
 with `lares scan`, read `lares plan`, and use `--dry-run` if you want the whole

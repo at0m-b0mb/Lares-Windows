@@ -37,6 +37,15 @@ EXPERT_TOKENS = 1400
 #: several similar actions in it.
 TEMPERATURE = 0.2
 
+#: How hard to push a model off a token it has already used. 1.05 is gentle,
+#: which suits the catalogue lane where the answer is mostly control ids and
+#: pushing too hard makes them wrong. Lanes that ask for prose supply their own
+#: - a 1.5B writing free text will otherwise find a sentence it likes and
+#: repeat it until the token budget is gone, which is not a hypothetical: a
+#: release build caught one saying the same sentence forty-five times inside a
+#: single JSON string, never reaching the part of the answer that mattered.
+REPEAT_PENALTY = 1.05
+
 
 @dataclass
 class Reply:
@@ -213,6 +222,7 @@ class Engine:
         max_tokens: int = PLAN_TOKENS,
         schema: dict[str, Any] | None = None,
         temperature: float = TEMPERATURE,
+        repeat_penalty: float = REPEAT_PENALTY,
         _echoed: bool = False,
     ) -> Reply:
         """One chat completion.
@@ -246,7 +256,7 @@ class Engine:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_p": 0.9,
-            "repeat_penalty": 1.05,
+            "repeat_penalty": repeat_penalty,
         }
         if schema is not None:
             kwargs["response_format"] = {"type": "json_object", "schema": schema}
@@ -269,7 +279,8 @@ class Engine:
                 # Retrying unconstrained is much better than failing the cycle;
                 # the parser downstream is written to cope with loose output.
                 return self.ask(system, user, max_tokens=max_tokens, schema=None,
-                                temperature=temperature, _echoed=True)
+                                temperature=temperature,
+                                repeat_penalty=repeat_penalty, _echoed=True)
             return self._told(watch, Reply(
                 "", ok=False, error=message[:300],
                 seconds=time.monotonic() - started))
@@ -443,6 +454,26 @@ def extract_json(text: str) -> dict[str, Any] | None:
         if isinstance(parsed, dict) and parsed:
             return parsed
     return None
+
+
+def looks_repetitive(text: str, *, window: int = 60, threshold: int = 6) -> bool:
+    """True when a reply is the same phrase over and over.
+
+    Worth naming rather than lumping in with "unusable JSON", because the two
+    have different answers. Malformed output is a parsing problem; this is a
+    model that found a sentence it liked and said it until the token budget ran
+    out, and telling someone that is what happened is the difference between a
+    report they can act on and one they cannot.
+
+    Counts repeats of the longest trailing phrase rather than any phrase: a
+    stuck model is stuck at the end, and a document that legitimately repeats a
+    boilerplate line earlier is not.
+    """
+    body = " ".join(text.split())
+    if len(body) < window * threshold:
+        return False
+    tail = body[-window:]
+    return body.count(tail) >= threshold
 
 
 def repair_json(text: str) -> str | None:
