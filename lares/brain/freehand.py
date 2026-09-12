@@ -147,6 +147,12 @@ ASSESS_SCHEMA: dict[str, Any] = {
         "summary": {"type": "string"},
         "issues": {
             "type": "array",
+            # Capped in the schema rather than only in the prompt. Where the
+            # backend compiles this into a grammar the limit is enforced by
+            # the sampler, which is what keeps a small model from spending its
+            # whole token budget listing issues and running out of room before
+            # it closes the document.
+            "maxItems": 6,
             "items": {
                 "type": "object",
                 "properties": {

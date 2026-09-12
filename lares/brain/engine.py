@@ -424,7 +424,93 @@ def extract_json(text: str) -> dict[str, Any] | None:
             continue
         if isinstance(parsed, dict):
             return parsed
+
+    # Last resort: the reply may simply have run out of room. A small model
+    # asked for several hundred tokens of JSON hits the cap mid-sentence often
+    # enough that treating it as unusable throws away work that was finished.
+    repaired = repair_json(text)
+    if repaired is not None:
+        try:
+            parsed = json.loads(repaired)
+        except ValueError:
+            return None
+        # An empty object is refused here even though it parses. A model that
+        # genuinely meant "{}" would have produced valid JSON and been read
+        # above; reaching this line means the reply was cut short, and a reply
+        # cut short before anything completed must not come back as a
+        # confident empty answer - which downstream reads as "nothing is
+        # wrong with this machine".
+        if isinstance(parsed, dict) and parsed:
+            return parsed
     return None
+
+
+def repair_json(text: str) -> str | None:
+    """Close a JSON object that stopped in the middle, discarding the last bit.
+
+    This exists because of what actually happens on the hardware this targets.
+    A 1.5B model asked for a plan with several rationales in it reaches the
+    token cap partway through a sentence, and the result is a document that is
+    correct up to the cut and unparseable because of it. Refusing the whole
+    reply loses four finished items to recover none.
+
+    The repair is deliberately conservative: rather than guessing at how to
+    finish the fragment, it rewinds to the last point where the document was
+    structurally complete - the end of a finished value, or a separator after
+    one - drops everything after that, and closes the containers that were
+    still open there. Whatever the model had actually finished saying survives;
+    the half-written item is gone rather than invented.
+
+    Returns None when there is nothing recoverable.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    body = text[start:]
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    #: Where to cut, and the closers owed at that point. Seeded empty so a
+    #: reply that was truncated before anything completed yields nothing
+    #: rather than "{}", which would read as a confident empty answer.
+    cut: int | None = None
+    owed: list[str] = []
+
+    def mark(index: int) -> None:
+        nonlocal cut, owed
+        cut, owed = index, list(stack)
+
+    for index, char in enumerate(body):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+            mark(index + 1)          # an empty container is already valid
+        elif char in "}]":
+            if not stack:
+                break                # more closers than openers: give up here
+            stack.pop()
+            mark(index + 1)
+        elif char == ",":
+            mark(index)              # everything before the comma is complete
+
+    if cut is None:
+        return None
+
+    head = body[:cut].rstrip().rstrip(",")
+    if not head:
+        return None
+    return head + "".join(reversed(owed))
 
 
 def strip_fence(text: str) -> str:

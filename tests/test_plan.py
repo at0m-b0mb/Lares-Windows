@@ -9,6 +9,7 @@ here against a real catalogue.
 
 from __future__ import annotations
 
+from lares.brain.engine import extract_json
 from lares.brain.plan import Planner, builtin_plan
 from lares.catalog import loader
 from lares.core import Finding, RiskTier, Scan
@@ -333,3 +334,52 @@ def test_a_long_rationale_does_not_end_mid_word():
     assert len(rationale) <= 404
     assert rationale.endswith("...")
     assert not rationale.rstrip(".").endswith("wor")
+
+
+# --------------------------------------------------------------------------
+# Replies that ran out of room
+# --------------------------------------------------------------------------
+
+class TestTruncatedReplies:
+    """A small model asked for several hundred tokens of JSON reaches the cap
+    mid-sentence, and the document is then correct up to the cut and
+    unparseable because of it. Refusing the whole reply loses everything the
+    model had actually finished saying."""
+
+    def test_a_reply_cut_off_inside_a_string_keeps_what_was_finished(self):
+        raw = ('{"summary": "ok", "actions": [{"control_id": "NET-005"}, '
+               '{"control_id": "SVC-003", "rationale": "the spooler is')
+        got = extract_json(raw)
+        assert got is not None
+        assert [a["control_id"] for a in got["actions"]] == ["NET-005", "SVC-003"]
+
+    def test_a_reply_cut_off_after_a_comma_keeps_the_complete_items(self):
+        raw = '{"summary": "ok", "actions": [{"control_id": "NET-005"},'
+        got = extract_json(raw)
+        assert got["actions"] == [{"control_id": "NET-005"}]
+
+    def test_a_reply_cut_off_before_anything_completed_is_refused(self):
+        """The dangerous repair, and the reason the empty case is special.
+
+        "{}" parses perfectly and reads downstream as a confident "nothing is
+        wrong with this machine". A model that genuinely meant that would have
+        produced valid JSON and never reached the repair at all.
+        """
+        assert extract_json('{"summ') is None
+        assert extract_json("{") is None
+
+    def test_an_empty_object_the_model_really_sent_is_still_read(self):
+        assert extract_json("{}") == {}
+
+    def test_escapes_inside_a_truncated_string_do_not_confuse_the_scan(self):
+        raw = r'{"fix": "Set-Item -Value \"C:\\x\"", "undo": "Undo-'
+        got = extract_json(raw)
+        assert got == {"fix": 'Set-Item -Value "C:\\x"'}
+
+    def test_a_valid_reply_is_never_touched_by_the_repair(self):
+        raw = '{"summary": "fine", "actions": []}'
+        assert extract_json(raw) == {"summary": "fine", "actions": []}
+
+    def test_text_with_no_object_at_all_is_still_nothing(self):
+        assert extract_json("I would check the firewall first.") is None
+        assert extract_json("") is None

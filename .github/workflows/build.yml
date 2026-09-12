@@ -99,10 +99,10 @@ jobs:
           # recorded walkthrough exercises every stage of the lane without a
           # model, and the binary must not be able to read a control.
           ./dist/lares-freehand.exe --version
-          $walk = ./dist/lares-freehand.exe --plain --demo --recorded --budget 2 | Out-String
-          if ($walk -notmatch "the code the model wrote") { throw "freehand walkthrough did not run" }
-          if ($walk -notmatch "REACHABLE FROM THE NETWORK") { throw "freehand read no ports" }
-          if ($walk -match "NET-005|IDN-001|SVC-003") { throw "the freehand build is carrying catalogue controls" }
+          $walk = ./dist/lares-freehand.exe --plain --demo --recorded --pace 0 --budget 2 | Out-String
+          if ($walk -notmatch "the code the model wrote") { Write-Host $walk; throw "freehand walkthrough did not run" }
+          if ($walk -notmatch "REACHABLE FROM THE NETWORK") { Write-Host $walk; throw "freehand read no ports" }
+          if ($walk -match "NET-005|IDN-001|SVC-003") { Write-Host $walk; throw "the freehand build is carrying catalogue controls" }
 
       - name: Name them for the release
         shell: pwsh
@@ -172,10 +172,23 @@ jobs:
           # And the freehand single file, which is the one that cannot work
           # without it. "no model here" is its one refusal, so a build that
           # says that is a build nobody can use.
-          $fh = ./dist/lares-freehand-full-x64.exe --plain --demo --dry-run --budget 1 | Out-String
+          # What is being tested here is that the binary finds the model
+          # inside itself. Whether a 1.5B model then produces a usable
+          # assessment of a synthetic machine is a separate question with a
+          # legitimate "no" - so the program's own exit code is read and
+          # cleared rather than being allowed to fail the step, and the output
+          # is printed either way, because a check that hides the thing it
+          # just checked cannot be debugged when it goes wrong.
+          $fh = ./dist/lares-freehand-full-x64.exe --plain --demo --dry-run --budget 1 2>&1 | Out-String
+          $ran = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          Write-Host $fh
+          Write-Host "lares-freehand-full-x64.exe exited $ran"
           if ($fh -match "there is no model here") {
-            Write-Host $fh
             throw "the freehand single file cannot see its own embedded model"
+          }
+          if ($fh -notmatch "what is on this machine") {
+            throw "the freehand single file did not get as far as reading the machine"
           }
           Write-Host "the freehand single file finds its model"
 
@@ -266,9 +279,9 @@ jobs:
           ./dist/lares.exe --plain --demo scan | Select-Object -First 20
 
           ./dist/lares-freehand.exe --version
-          $walk = ./dist/lares-freehand.exe --plain --demo --recorded --budget 2 | Out-String
-          if ($walk -notmatch "the code the model wrote") { throw "freehand walkthrough did not run" }
-          if ($walk -match "NET-005|IDN-001|SVC-003") { throw "the freehand build is carrying catalogue controls" }
+          $walk = ./dist/lares-freehand.exe --plain --demo --recorded --pace 0 --budget 2 | Out-String
+          if ($walk -notmatch "the code the model wrote") { Write-Host $walk; throw "freehand walkthrough did not run" }
+          if ($walk -match "NET-005|IDN-001|SVC-003") { Write-Host $walk; throw "the freehand build is carrying catalogue controls" }
 
       - name: Name them for the release
         shell: pwsh
@@ -318,10 +331,23 @@ jobs:
           }
           Write-Host "the bundled ARM64 backend loads"
 
-          $fh = ./dist/lares-freehand-full-arm64.exe --plain --demo --dry-run --budget 1 | Out-String
+          # What is being tested here is that the binary finds the model
+          # inside itself. Whether a 1.5B model then produces a usable
+          # assessment of a synthetic machine is a separate question with a
+          # legitimate "no" - so the program's own exit code is read and
+          # cleared rather than being allowed to fail the step, and the output
+          # is printed either way, because a check that hides the thing it
+          # just checked cannot be debugged when it goes wrong.
+          $fh = ./dist/lares-freehand-full-arm64.exe --plain --demo --dry-run --budget 1 2>&1 | Out-String
+          $ran = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          Write-Host $fh
+          Write-Host "lares-freehand-full-arm64.exe exited $ran"
           if ($fh -match "there is no model here") {
-            Write-Host $fh
             throw "the freehand ARM64 single file cannot see its own embedded model"
+          }
+          if ($fh -notmatch "what is on this machine") {
+            throw "the freehand ARM64 single file did not get as far as reading the machine"
           }
           Write-Host "the freehand ARM64 single file finds its model"
 
@@ -435,7 +461,7 @@ jobs:
           $fh = "$dir\lares-freehand.exe"
           if (-not (Test-Path $fh)) { throw "lares-freehand.exe was not installed" }
           & $fh --version
-          $walk = & $fh --plain --demo --recorded --budget 2 | Out-String
+          $walk = & $fh --plain --demo --recorded --pace 0 --budget 2 | Out-String
           if ($walk -notmatch "the code the model wrote") {
             Write-Host $walk
             throw "the freehand walkthrough did not run"
