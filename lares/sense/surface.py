@@ -29,6 +29,7 @@ silence.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -88,8 +89,18 @@ class Surface:
     def failures(self) -> list[Section]:
         return [s for s in self.sections if s.error]
 
+    def has(self, key: str) -> bool:
+        """Whether this view was read at all.
+
+        Not the same as whether it found anything, and the difference matters
+        in every summary line: "0 installed products" and "the software list
+        was not read" look identical if you only count rows.
+        """
+        section = self.get(key)
+        return section is not None and section.ok
+
     def render(self, *, limit: int = DEFAULT_ROWS, budget: int = 0,
-               only: list[str] | None = None) -> str:
+               only: list[str] | None = None, headers: bool = True) -> str:
         """The survey as text for the model.
 
         *budget* is a character ceiling for the whole thing. Sections are
@@ -101,33 +112,44 @@ class Surface:
         *only* narrows it to named sections. Asking for the code that fixes one
         service does not need the installed software list, and on a 4k window
         the space that list takes is space the fix has to be written in.
+
+        The budget is a ceiling and not a suggestion. An earlier version gave
+        up once it had trimmed each section to five rows and returned whatever
+        that came to - about 2,200 characters for six readings, which sailed
+        past a 600-character budget and overflowed the context window of the
+        very model it was being sized for. Trimming rows is tried first
+        because it loses the least, and when that is not enough the text is
+        cut and says so.
         """
         cap = limit
         while True:
-            text = self._render_at(cap, only)
-            if not budget or len(text) <= budget or cap <= 5:
+            text = self._render_at(cap, only, headers)
+            if not budget or len(text) <= budget:
                 return text
-            cap = max(5, cap // 2)
+            if cap <= 1:
+                return _cut(text, budget)
+            cap = max(1, cap // 2)
 
-    def _render_at(self, limit: int, only: list[str] | None = None) -> str:
+    def _render_at(self, limit: int, only: list[str] | None = None,
+                   headers: bool = True) -> str:
         wanted = {k.strip().lower() for k in only} if only else None
         blocks: list[str] = []
         for section in self.sections:
             if wanted is not None and section.key not in wanted:
                 continue
-            head = f"== {section.title} =="
+            head = f"== {section.title} ==" if headers else ""
             if section.error:
-                blocks.append(f"{head}\n  (could not be read: {section.error})")
+                blocks.append(_block(head, [f"  (could not be read: {section.error})"]))
                 continue
             if not section.rows:
-                blocks.append(f"{head}\n  (nothing found)")
+                blocks.append(_block(head, ["  (nothing found)"]))
                 continue
-            lines = [_line(section.key, row) for row in section.rows[:limit]]
+            lines = [line(section.key, row) for row in section.rows[:limit]]
             if len(section.rows) > limit:
                 lines.append(f"  ... and {len(section.rows) - limit} more")
             if section.note:
                 lines.append(f"  note: {section.note}")
-            blocks.append(head + "\n" + "\n".join(lines))
+            blocks.append(_block(head, lines))
         return "\n\n".join(blocks)
 
     def headline(self) -> str:
@@ -141,8 +163,33 @@ class Surface:
         return ", ".join(parts)
 
 
-def _line(key: str, row: dict[str, Any]) -> str:
-    """One row, as a line the model can read without a schema."""
+#: Said in full when a reading is cut, because a model shown a truncated list
+#: with no marker has no way to know it is reasoning about part of one.
+CUT_NOTE = "\n... (this reading was cut to fit)"
+
+
+def _cut(text: str, budget: int) -> str:
+    """Hard ceiling, trimmed to a line boundary so nothing ends mid-fact."""
+    room = max(0, budget - len(CUT_NOTE))
+    kept = text[:room]
+    edge = kept.rfind("\n")
+    if edge > room // 2:
+        kept = kept[:edge]
+    return kept.rstrip() + CUT_NOTE
+
+
+def _block(head: str, lines: list[str]) -> str:
+    """One section, with or without its heading."""
+    return "\n".join(([head] if head else []) + lines)
+
+
+def line(key: str, row: dict[str, Any]) -> str:
+    """One row, as a line a person or a model can read without a schema.
+
+    Public because the desktop application renders the same rows and must not
+    invent a second way of wording them - a port that reads "REACHABLE FROM
+    THE NETWORK" in the terminal should not read anything else in the window.
+    """
     if key == "software":
         version = row.get("version") or "unknown version"
         publisher = row.get("publisher") or ""
@@ -270,7 +317,7 @@ try {
       enabled = [bool]$u.Enabled
       admin = [bool]($admins -contains $u.Name)
       never_expires = [bool]$u.PasswordNeverExpires
-      last_logon = if ($u.LastLogon) { $u.LastLogon.ToString('yyyy-MM-dd') } else { '' }
+      last_logon = $(if ($u.LastLogon) { $u.LastLogon.ToString('yyyy-MM-dd') } else { '' })
     }
   }
 } catch {
@@ -278,7 +325,7 @@ try {
     $rows += [pscustomobject]@{
       name = $u.Name; enabled = (-not $u.Disabled)
       admin = [bool]($admins -contains $u.Name)
-      never_expires = [bool]$u.PasswordExpires -eq $false; last_logon = ''
+      never_expires = $(-not [bool]$u.PasswordExpires); last_logon = ''
     }
   }
 }
@@ -341,8 +388,6 @@ COLLECTORS: tuple[tuple[str, str, str], ...] = (
 def survey(*, progress: Progress | None = None,
            only: list[str] | None = None) -> Surface:
     """Read every view of the machine. Changes nothing."""
-    import time
-
     started = time.monotonic()
     result = Surface(demo=is_demo())
     wanted = {k.strip().lower() for k in only} if only else None
@@ -361,8 +406,6 @@ def survey(*, progress: Progress | None = None,
 
 def _collect(key: str, title: str, script: str) -> Section:
     """Run one collector and shape what it returned."""
-    import time
-
     started = time.monotonic()
     section = Section(key=key, title=title)
 
@@ -379,6 +422,16 @@ def _collect(key: str, title: str, script: str) -> Section:
         section.error = clean_clixml(result.error or result.stderr)[:200] or "no output"
         logs.get().warn("scan", f"Surface collector {key} failed",
                         detail=section.error)
+        return section
+
+    if not result.stdout.strip():
+        # A collector that succeeded and returned nothing has found nothing,
+        # which is an ordinary answer: no third-party software, no local
+        # accounts on a domain controller, nothing listening on UDP.
+        # ConvertTo-Json emits no output at all for an empty set, so reading
+        # that as "the reading was not usable JSON" turned every empty result
+        # into a failure and told the model a view was unavailable when it had
+        # been read perfectly well.
         return section
 
     payload = result.json(default=None)

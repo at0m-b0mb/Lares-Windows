@@ -492,8 +492,14 @@ class Freehand:
         # -- dry run -----------------------------------------------------
         if self.dry_run or is_demo():
             outcome.status = Status.SIMULATED
-            outcome.message = ("decided everything and changed nothing "
-                               "(dry run)")
+            # Precise rather than tidy. The model's check has already run by
+            # this point - it is screened and declared read-only, but it is
+            # still code the model wrote, and "changed nothing" would be a
+            # claim about a script this program did not author.
+            outcome.message = (
+                "ran the model's own check, decided what would happen, and "
+                "applied nothing" if remedy.check.strip() else
+                "decided what would happen and applied nothing")
             stage("simulated", outcome.message)
             return self._finish(attempt, started)
 

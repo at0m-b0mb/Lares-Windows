@@ -10,6 +10,7 @@ Dashboard/Settings/Advanced, because those names tell you nothing about which
 one you want:
 
     Hearth     what this machine looks like right now, and the record of it
+    Exposure   what is installed, what is listening, who can log in
     Findings   everything open, worst first
     Ledger     every change Lares has made, and the button that undoes one
     Chronicle  the activity log, the failures, and the model conversation
@@ -50,17 +51,20 @@ from ..act.guard import Context
 from ..act.journal import Journal
 from ..autonomy.loop import Agent, Event, build
 from ..brain import models
+from ..brain.engine import Watch as EngineWatch
 from ..catalog import loader
 from ..core import Cycle, RiskTier, Scan
 from ..report import write_report
 from ..sense import scanner
+from ..sense import surface as surface_mod
 from ..version import ETYMOLOGY, NAME, VERSION
 from ..winsys import current_user, is_demo, is_elevated
 from . import theme, widgets
 from .theme import Mode, space
 from .widgets import Card, Column, Field, NavButton, Row, Rule, SeverityBar, Text, Tile, Watch
 
-PAGES = ["Hearth", "Findings", "Ledger", "Chronicle", "Catalogue", "Model", "Colophon"]
+PAGES = ["Hearth", "Exposure", "Findings", "Ledger", "Chronicle", "Catalogue",
+         "Model", "Colophon"]
 
 
 # --------------------------------------------------------------------------
@@ -94,6 +98,50 @@ class Worker(QObject):
             self.stopped.emit()
 
 
+class SurveyWorker(QObject):
+    """Reads the machine off the interface thread.
+
+    Six PowerShell collectors take several seconds between them, and on a slow
+    machine rather more than that. Run on the interface thread they would
+    freeze the window for the whole of it, which is the difference between an
+    application that is working and one that has hung.
+    """
+
+    progressed = pyqtSignal(str)
+    finished = pyqtSignal(object)      # Surface
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            found = surface_mod.survey(progress=self.progressed.emit)
+        except Exception as exc:  # noqa: BLE001 - a bad reading must not kill the window
+            logs.get().error("scan", "The surface survey failed", exc=exc)
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(found)
+
+
+class ModelVoice(QObject):
+    """Carries the model's side of a conversation onto the interface thread.
+
+    The engine's callbacks fire wherever generation happens, which is the
+    agent's thread, and Qt objects may only be touched from the thread that
+    made them. Emitting a signal is the one thing that is safe to do from
+    anywhere, so this translates one into the other and nothing else.
+    """
+
+    asked = pyqtSignal(str, str)       # system prompt, what it was told
+    token = pyqtSignal(str)            # one fragment, as it is produced
+    answered = pyqtSignal(object)      # Reply
+
+    def watch(self) -> EngineWatch:
+        return EngineWatch(
+            on_prompt=lambda system, user: self.asked.emit(system, user),
+            on_token=self.token.emit,
+            on_reply=self.answered.emit,
+        )
+
+
 # --------------------------------------------------------------------------
 # Window
 # --------------------------------------------------------------------------
@@ -102,6 +150,8 @@ class Window(QMainWindow):
     def __init__(self, settings: config_mod.Settings, autostart: bool = True) -> None:
         super().__init__()
         self.settings = settings
+        #: Read by the pages while they are built, so it is set before _build.
+        self.autostart = autostart
         self.mode = theme.resolve(settings.theme)
         self.catalog = loader.load()
         self.journal = Journal()
@@ -113,6 +163,13 @@ class Window(QMainWindow):
         self.worker: Worker | None = None
         self._running = False
 
+        # The live view of the conversation. Attached once, here, because the
+        # engine is the single object every lane asks through - so one
+        # attachment covers the planner, and anything else that asks later.
+        self.voice = ModelVoice()
+        if self.agent.engine is not None:
+            self.agent.engine.watch = self.voice.watch()
+
         self.setWindowTitle(NAME)
         self.resize(1120, 760)
         self.setMinimumSize(940, 620)
@@ -120,6 +177,10 @@ class Window(QMainWindow):
         self._build()
         self.apply_theme()
         self._show_page(0)
+
+        self.voice.asked.connect(self.page_hearth.asked)
+        self.voice.token.connect(self.page_hearth.token)
+        self.voice.answered.connect(self.page_hearth.answered)
 
         if autostart:
             # The application does its job without being asked. A short delay
@@ -138,16 +199,24 @@ class Window(QMainWindow):
 
         self.pages = QStackedWidget()
         self.page_hearth = HearthPage(self)
+        self.page_exposure = ExposurePage(self)
         self.page_findings = FindingsPage(self)
         self.page_ledger = LedgerPage(self)
         self.page_chronicle = ChroniclePage(self)
         self.page_catalogue = CataloguePage(self)
         self.page_model = ModelPage(self)
         self.page_colophon = ColophonPage(self)
-        # The order here must match PAGES, since the sidebar selects by index.
-        for page in (self.page_hearth, self.page_findings, self.page_ledger,
-                     self.page_chronicle, self.page_catalogue, self.page_model,
-                     self.page_colophon):
+        # One list, held, because there were two of these and adding a page
+        # meant remembering both. The second was the retheme loop, where
+        # forgetting shows up only when someone switches to dark - which is
+        # exactly the kind of bug that ships.
+        self.page_list = (self.page_hearth, self.page_exposure,
+                          self.page_findings, self.page_ledger,
+                          self.page_chronicle, self.page_catalogue,
+                          self.page_model, self.page_colophon)
+        assert len(self.page_list) == len(PAGES), \
+            "the sidebar selects by index, so these must stay the same length"
+        for page in self.page_list:
             self.pages.addWidget(_scrolled(page))
         layout.add(self.pages, 1)
 
@@ -219,9 +288,7 @@ class Window(QMainWindow):
             widget.apply(self.mode)
         for widget in self.findChildren(Tile):
             widget.apply(self.mode)
-        for page in (self.page_hearth, self.page_findings, self.page_ledger,
-                     self.page_chronicle, self.page_catalogue, self.page_model,
-                     self.page_colophon):
+        for page in self.page_list:
             if hasattr(page, "retheme"):
                 page.retheme(self.mode)
 
@@ -301,6 +368,12 @@ class Window(QMainWindow):
         if self.thread is not None:
             self.thread.quit()
             self.thread.wait(4000)
+        # The survey has its own thread and it was not being stopped here.
+        # Qt aborts the process when a QThread is destroyed while still
+        # running, so closing the window during a reading - which takes
+        # several seconds, precisely when someone is most likely to give up
+        # and close it - took the application down on the way out.
+        self.page_exposure.shutdown()
         event.accept()
 
 
@@ -388,8 +461,54 @@ class HearthPage(Page):
         activity.add(self.idle)
         self.outer.addWidget(activity)
 
+        # -- the model, thinking ----------------------------------------
+        # Hidden until there is something to show. A permanently empty box
+        # labelled "the model is thinking" on a machine with no model reads as
+        # something broken rather than something absent.
+        self.think_card = Card(mode)
+        self.think_card.add(widgets.heading("The model, thinking", mode))
+        self.think_note = Text("", "small", theme.MUTED, mode, wrap=True)
+        self.think_card.add(self.think_note)
+        self.think = widgets.mono("", mode)
+        self.think.setWordWrap(True)
+        self.think_card.add(self.think)
+        self.think_card.setVisible(False)
+        self.outer.addWidget(self.think_card)
+
         self.outer.addStretch(1)
         self._log_lines = 0
+        self._thinking = ""
+
+    # -- the conversation, as it happens --------------------------------
+
+    def asked(self, system: str, user: str) -> None:
+        """A question has gone to the model."""
+        self._thinking = ""
+        self.think.setText("")
+        self.think_note.setText(
+            f"Asked for {len(user):,} characters of this machine's state. "
+            "Its answer appears below as it is written.")
+        self.think_card.setVisible(True)
+
+    def token(self, fragment: str) -> None:
+        """One more piece of the answer.
+
+        Only the tail is kept on screen. A planning reply is a thousand
+        characters and the interesting part is the end that is still arriving;
+        holding all of it would grow the label without bound over a long watch.
+        """
+        self._thinking = (self._thinking + fragment)[-1400:]
+        self.think.setText(self._thinking)
+
+    def answered(self, reply: object) -> None:
+        ok = getattr(reply, "ok", False)
+        if ok:
+            self.think_note.setText(
+                f"Answered in {getattr(reply, 'seconds', 0):.1f}s at "
+                f"{getattr(reply, 'tps', 0):.1f} tokens a second.")
+        else:
+            self.think_note.setText(
+                f"The model did not answer: {getattr(reply, 'error', '')}")
 
     def log(self, message: str, detail: str, mode: Mode) -> None:
         self.idle.setVisible(False)
@@ -426,6 +545,171 @@ class HearthPage(Page):
         self.t_undone.set_value(str(undone))
 
         self.watch.set_cycles(window.agent.breaker.state.cycles)
+
+
+class ExposurePage(Page):
+    """What is on this machine and what of it is reachable.
+
+    The Findings page answers "is this machine compliant with thirty checks a
+    person wrote", which is a narrow question by design. This answers the one
+    people ask first and the catalogue cannot: what is installed, what is
+    listening, and who can log in.
+
+    Nothing here has an opinion. It is a reading, taken read-only, and it is
+    deliberately separate from the pages that decide things.
+    """
+
+    #: Which readings lead. Ports and exposure are the attack surface proper;
+    #: the rest is context for it.
+    ORDER = ("ports", "exposure", "accounts", "services", "software", "system")
+
+    def __init__(self, window: Window) -> None:
+        super().__init__(window, "Exposure",
+                         "Everything installed, everything listening, and everyone "
+                         "who can log in. Read-only - this page changes nothing.")
+        mode = window.mode
+
+        controls = Row()
+        self.read_button = QPushButton("Read this machine")
+        self.read_button.clicked.connect(self.start)
+        controls.add(self.read_button)
+        self.status = Text("Not read yet.", "small", theme.MUTED, mode, wrap=True)
+        controls.add(self.status, 1)
+        self.outer.addWidget(controls)
+
+        tiles = Card(mode)
+        row = Row(9)
+        self.t_exposed = Tile("-", "reachable ports", theme.INK, mode)
+        self.t_listening = Tile("-", "listening", theme.MUTED, mode)
+        self.t_software = Tile("-", "installed", theme.MUTED, mode)
+        self.t_admins = Tile("-", "administrators", theme.MEDIUM, mode)
+        for tile in (self.t_exposed, self.t_listening, self.t_software, self.t_admins):
+            row.add(tile)
+        row.spacer()
+        tiles.add(row)
+        self.outer.addWidget(tiles)
+
+        self.body = Column()
+        self.outer.addWidget(self.body)
+        self.outer.addStretch(1)
+
+        self.surface: surface_mod.Surface | None = None
+        self._thread: QThread | None = None
+        self._worker: SurveyWorker | None = None
+
+        # Nothing else in this application waits to be asked, and a page whose
+        # entire content is behind a button is a page most people will decide
+        # is empty. The delay lets the window paint and keeps the six
+        # collectors off the back of the first scan.
+        if window.autostart:
+            QTimer.singleShot(2500, self.start)
+
+    # -- reading --------------------------------------------------------
+
+    def start(self) -> None:
+        """Read the machine, off the interface thread."""
+        if self._thread is not None:
+            return
+        self.read_button.setEnabled(False)
+        self.status.setText("Reading...")
+
+        self._thread = QThread()
+        self._worker = SurveyWorker()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progressed.connect(self._progress)
+        self._worker.finished.connect(self._done)
+        self._worker.failed.connect(self._failed)
+        self._thread.start()
+
+    def _progress(self, message: str) -> None:
+        self.status.setText(message)
+
+    def _stop_thread(self) -> None:
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(2000)
+        self._thread = None
+        self._worker = None
+        self.read_button.setEnabled(True)
+
+    def shutdown(self) -> None:
+        """Called when the window is closing, running or not."""
+        self._stop_thread()
+
+    def _failed(self, detail: str) -> None:
+        self._stop_thread()
+        self.status.setText(f"That did not work: {detail}")
+
+    def _done(self, found: object) -> None:
+        self._stop_thread()
+        self.surface = found            # type: ignore[assignment]
+        self.refresh()
+
+    # -- rendering ------------------------------------------------------
+
+    def refresh(self) -> None:
+        found = self.surface
+        if found is None:
+            return
+        mode = self.window_ref.mode
+
+        exposed = [r for r in found.rows("ports") if r.get("exposed")]
+        admins = sum(1 for r in found.rows("accounts") if r.get("admin"))
+
+        def tile(key: str, value: int) -> str:
+            # "0" and "we did not look" are the same number and completely
+            # different facts, and a tile has no room to say which.
+            return str(value) if found.has(key) else "?"
+
+        self.t_exposed.set_value(tile("ports", len(exposed)))
+        self.t_listening.set_value(tile("ports", len(found.rows("ports"))))
+        self.t_software.set_value(tile("software", len(found.rows("software"))))
+        self.t_admins.set_value(tile("accounts", admins))
+
+        when = found.at.replace("T", " ")[:19]
+        self.status.setText(
+            f"Read in {found.duration_ms / 1000:.1f}s at {when}."
+            + ("  This is demonstration data." if found.demo else ""))
+
+        self.body.clear()
+        ordered = sorted(
+            found.sections,
+            key=lambda sec: (self.ORDER.index(sec.key)
+                             if sec.key in self.ORDER else len(self.ORDER)))
+        for section in ordered:
+            card = Card(mode)
+            card.add(widgets.heading(section.title, mode))
+            if section.error:
+                card.add(Text(f"Could not be read: {section.error}",
+                              "body", theme.WARNING, mode, wrap=True))
+                self.body.add(card)
+                continue
+            if section.note:
+                card.add(Text(section.note, "small", theme.MUTED, mode, wrap=True))
+
+            table = QTableWidget(0, 1)
+            table.setHorizontalHeaderLabels([f"{len(section.rows)} entries"])
+            table.verticalHeader().setVisible(False)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setAlternatingRowColors(True)
+            table.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.Stretch)
+            rows = section.rows
+            table.setRowCount(len(rows))
+            for index, row in enumerate(rows):
+                item = QTableWidgetItem(
+                    surface_mod.line(section.key, row).strip())
+                if section.key == "ports" and row.get("exposed"):
+                    item.setForeground(theme.WARNING.q(mode))
+                elif section.key == "accounts" and row.get("admin"):
+                    item.setForeground(theme.MEDIUM.q(mode))
+                elif section.key == "services" and row.get("unquoted"):
+                    item.setForeground(theme.WARNING.q(mode))
+                table.setItem(index, 0, item)
+            table.setFixedHeight(min(360, 34 + 24 * max(1, len(rows))))
+            card.add(table)
+            self.body.add(card)
 
 
 class FindingsPage(Page):
@@ -630,7 +914,9 @@ class ChroniclePage(Page):
         talk.add(widgets.heading("Conversation with the model", mode))
         talk.add(Text(
             "Each exchange records what Lares asked, what the model answered, "
-            "and which of its choices the guard accepted or refused.",
+            "and which of its choices the guard accepted or refused. To watch "
+            "one happen rather than read it afterwards, the Hearth shows the "
+            "answer arriving a word at a time.",
             "body", theme.INK_SOFT, mode, wrap=True))
         self.talk_body = Column()
         talk.add(self.talk_body)
@@ -911,6 +1197,28 @@ class ColophonPage(Page):
             "with consequences a health check cannot measure, so it reports them "
             "and stops.", "body", theme.INK, mode, wrap=True))
         self.outer.addWidget(limits)
+
+        # The trust model is the single most important thing about this
+        # application, and until now the window never said what it was - a
+        # person could use it for a year without learning that the model here
+        # cannot write code, or that there is a program where it can.
+        trust = Card(mode)
+        trust.add(widgets.heading("Who writes the code that runs", mode))
+        trust.add(Text(
+            "In this application, a person did. The model chooses from the "
+            f"{len(window.catalog)} remediations in the catalogue and supplies "
+            "their parameters; it cannot introduce one, edit one, or write a "
+            "line of PowerShell that reaches this machine. Everything it "
+            "proposes is checked against the catalogue before anything runs.",
+            "body", theme.INK, mode, wrap=True))
+        trust.add(Text(
+            "There is a second program, lares-freehand, that answers this "
+            "differently: no catalogue at all, and the model writes every fix "
+            "itself. It is a separate executable on purpose, because that is "
+            "not a setting - it is a different answer to the only question "
+            "that matters here, and a flag is too quiet a way to change it.",
+            "body", theme.INK_SOFT, mode, wrap=True))
+        self.outer.addWidget(trust)
 
         build_card = Card(mode)
         build_card.add(widgets.heading("The name", mode))

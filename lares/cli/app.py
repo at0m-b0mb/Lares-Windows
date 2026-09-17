@@ -171,6 +171,84 @@ def _show_scan(console: Console, scan: Scan, catalog, verbose: bool = False) -> 
             console.detail(finding.evidence)
 
 
+def cmd_surface(args: argparse.Namespace, console: Console) -> int:
+    """What is on this machine and what of it is reachable.
+
+    Read-only, and it needs no model. The catalogue answers "is this machine
+    compliant with thirty checks a person wrote", which is a narrow question by
+    design. This answers the broader one someone actually asks first - what is
+    installed, what is listening, who can log in - and answers it without
+    deciding anything about it.
+    """
+    from ..sense import surface as surface_mod
+
+    only = [p.strip() for p in args.only.split(",")] if args.only else None
+
+    # Nothing is printed before the reading when JSON was asked for. A banner
+    # above a JSON document makes it a document that does not parse, which is
+    # the one thing the flag exists to avoid.
+    if not args.json:
+        console.rule(f"Lares {VERSION} - attack surface")
+        console.paragraph(
+            "Six read-only readings. Nothing here is changed, and nothing here "
+            "has an opinion: it is what an attacker would enumerate, listed.")
+        console.blank()
+        with console.status("Reading") as status:
+            found = surface_mod.survey(progress=status, only=only)
+    else:
+        found = surface_mod.survey(only=only)
+
+    if args.json:
+        print(dumps({
+            "at": found.at,
+            "demo": found.demo,
+            "duration_ms": found.duration_ms,
+            "sections": [
+                {"key": s.key, "title": s.title, "error": s.error,
+                 "note": s.note, "rows": s.rows}
+                for s in found.sections
+            ],
+        }))
+        return 0
+
+    for section in found.sections:
+        console.blank()
+        console.section(section.title)
+        if section.error:
+            console.warn(f"could not be read: {section.error}")
+            continue
+        if not section.rows:
+            console.dim("  nothing found")
+            continue
+        console.script(surface_mod.Surface(sections=[section]).render(
+            limit=len(section.rows) if args.verbose else 25, headers=False))
+
+    def count(key: str, n: int) -> str:
+        # A view that was not read and a view that found nothing are the same
+        # number and completely different facts.
+        return str(n) if found.has(key) else "not read"
+
+    exposed = [r for r in found.rows("ports") if r.get("exposed")]
+    admins = sum(1 for r in found.rows("accounts") if r.get("admin"))
+    console.blank()
+    console.rule("what this adds up to")
+    console.field("Listening, reachable", count("ports", len(exposed)))
+    console.field("Installed products", count("software", len(found.rows("software"))))
+    console.field("Administrators", count("accounts", admins))
+    console.field("Read in", f"{found.duration_ms / 1000:.1f}s")
+
+    if found.failures:
+        console.blank()
+        for section in found.failures:
+            console.warn(f"{section.title} could not be read - "
+                         "this listing is incomplete")
+
+    console.blank()
+    console.dim("Nothing was changed. To have a model act on this, use "
+                "lares-freehand.")
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace, console: Console) -> int:
     catalog = loader.load()
     settings = _settings_from(args, console)
@@ -786,7 +864,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lares",
         description="Lares - an autonomous Windows hardening agent with a local model.",
-        epilog="Run 'lares run' once to see what it does, then 'lares watch' to leave it running.",
+        epilog=(
+            "Run 'lares run' once to see what it does, then 'lares watch' to "
+            "leave it running. 'lares surface' lists what is on this machine "
+            "without changing any of it.\n\n"
+            "There is a second program, lares-freehand, with no catalogue in "
+            "it: the model writes every fix itself. It is a separate "
+            "executable on purpose."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"Lares {VERSION}")
     parser.add_argument("--demo", action="store_true",
@@ -825,6 +910,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--report", metavar="PATH", help="write an HTML or JSON report")
     p.add_argument("--json", action="store_true", help="print the scan as JSON")
     p.set_defaults(func=cmd_scan)
+
+    p = sub.add_parser("surface",
+                       help="what is installed, what is listening, who can log in")
+    p.add_argument("--only", default="",
+                   help="restrict it, e.g. ports,software")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="every row, rather than the first 25 of each")
+    p.add_argument("--json", action="store_true", help="print it as JSON")
+    p.set_defaults(func=cmd_surface)
 
     p = sub.add_parser("plan", help="show what it would do, and why")
     common(p)

@@ -98,6 +98,10 @@ ITEMS: list[tuple[str, str, list[str]]] = [
     ("Keep working in the background",
      "Run cycles on a schedule until you stop it.",
      ["watch"]),
+    ("What is on this machine?",
+     "Installed software and versions, every listening port, services, "
+     "accounts. Read-only, and it needs no model.",
+     ["surface"]),
     ("What has it changed?",
      "Every change made to this machine, and how to put one back.",
      ["journal"]),

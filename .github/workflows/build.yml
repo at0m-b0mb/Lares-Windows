@@ -94,6 +94,23 @@ jobs:
           ./dist/lares.exe --plain --demo scan | Select-Object -First 20
           if (-not (Test-Path ./dist/lares-desktop.exe)) { throw "desktop build missing" }
 
+          # The survey reads this runner for real - it is read-only, so there
+          # is nothing to undo, and it is the only place the six PowerShell
+          # collectors meet an actual Windows before a user does. A syntax
+          # error in one of them looks like "could not be read" rather than a
+          # crash, so the check is that every view came back.
+          $surface = ./dist/lares.exe --plain surface --json | Out-String
+          $parsed = $surface | ConvertFrom-Json
+          $broken = $parsed.sections | Where-Object { $_.error }
+          if ($broken) {
+            $broken | ForEach-Object { Write-Host "$($_.key): $($_.error)" }
+            throw "a surface collector could not read this machine"
+          }
+          Write-Host "all $($parsed.sections.Count) readings came back"
+          if (-not ($parsed.sections | Where-Object { $_.key -eq "ports" }).rows) {
+            throw "nothing is listening on this machine, which cannot be true"
+          }
+
           # The freehand binary is the one that claims to carry no catalogue,
           # so the smoke test checks the claim rather than restating it: the
           # recorded walkthrough exercises every stage of the lane without a

@@ -280,6 +280,36 @@ def check_gui() -> Check:
     )
 
 
+def check_freehand() -> Check:
+    """Whether the companion with no catalogue is installed.
+
+    Graded OK either way, for the same reason the desktop companion is. Its
+    absence is a fact about what was downloaded, not a defect in what is
+    running, and grading a complete installation as limited because a second
+    optional program is missing is how a healthy machine ends up being told it
+    is unhealthy.
+
+    Outside a packaged build there is nothing useful to say: the lane is a
+    module in this same source tree, so it is always present.
+    """
+    if not getattr(sys, "frozen", False):
+        return Check("Freehand companion", State.OK,
+                     "available in this source tree")
+
+    beside = Path(sys.executable).resolve().parent
+    for name in ("lares-freehand.exe", "lares-freehand-full.exe"):
+        if (beside / name).exists():
+            return Check("Freehand companion", State.OK,
+                         f"{name} is installed - the model writes every fix there")
+    return Check(
+        "Freehand companion", State.OK,
+        "not installed; this application does not need it",
+        "lares-freehand is the lane with no catalogue: the model writes the "
+        "PowerShell itself rather than choosing from vetted controls. Add it "
+        "with the installer's -Freehand switch, or from the releases page.",
+    )
+
+
 def check_model_backend() -> Check:
     """Whether the model backend actually loads.
 
@@ -383,6 +413,7 @@ def run() -> list[Check]:
         check_storage(),
         check_catalog(),
         check_gui(),
+        check_freehand(),
         check_model_backend(),
         check_virtualisation(),
     ]

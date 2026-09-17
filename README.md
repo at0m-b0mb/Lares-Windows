@@ -110,7 +110,7 @@ question differently. None of them needs the others.
 | | |
 |---|---|
 | **`lares.exe`** | Terminal. Uses colour when `rich` is available and plain text when it is not, because a machine with nothing installed is exactly the machine that most needs hardening. `lares watch` is the agent with no window. |
-| **`lares-desktop.exe`** | Desktop. Starts working the moment it opens and keeps working whether you look at it or not. |
+| **`lares-desktop.exe`** | Desktop. Starts working the moment it opens and keeps working whether you look at it or not. Its **Exposure** page reads the machine the same way the survey below does, and the Hearth shows the model's answer arriving a word at a time. |
 | **`lares-freehand.exe`** | No catalogue. It reads the machine, asks the model what is wrong, and runs the PowerShell the model writes back. A different trust model, deliberately a different program — see [The freehand lane](#the-freehand-lane). |
 
 <div align="center">
@@ -212,6 +212,13 @@ as it arrives. The system prompt is printed once and not reprinted between
 rounds, because five hundred tokens of unchanged rules between every question
 buries the part that actually changed.
 
+The desktop application shows the same thing on its **Hearth** page, under
+*The model, thinking* — the answer appearing as it is written, with what it
+cost underneath. There is no flag for it: the window is already watching.
+The card stays hidden until there is something to put in it, because an empty
+box labelled "the model is thinking" on a machine with no model reads as
+something broken rather than something absent.
+
 ### Seeing it work
 
 `lares demo` walks through one full round trip and shows the working at every
@@ -295,6 +302,21 @@ None of it has an opinion. Two fields are derived — *this socket is bound to
 0.0.0.0*, *this path has a space and no quotes* — and those are facts about the
 reading, no different from the port number. The model is the only thing that
 says whether any of it matters.
+
+**The same reading is available without the freehand lane and without a
+model.** It is read-only and it decides nothing, so there is no reason to keep
+it behind the program that acts on it:
+
+```powershell
+lares surface                      # all six readings
+lares surface --only ports,software
+lares surface --json               # for something else to read
+```
+
+In the desktop application it is the **Exposure** page, which reads the machine
+off the interface thread so the window stays usable while six PowerShell
+collectors run. A count it did not take reads `not read` rather than `0` —
+those are the same number and completely different facts.
 
 ### What is still not the model's to decide
 
@@ -492,10 +514,10 @@ a different program — see [The freehand lane](#the-freehand-lane).
 
 ## Status, stated plainly
 
-**v0.5.2. The engine is tested. Most of the PowerShell has run once, on one machine.**
+**v0.6.0. The engine is tested. Most of the PowerShell has run once, on one machine.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **482 tests** that run on Windows
+loader, the logging, the theme — is covered by **539 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 The PowerShell is a different matter, and the honest position has three parts:
@@ -549,11 +571,13 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-482 tests, none of which need Windows. They cover the guard against injection
+539 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay
-including corrupted and truncated payloads, and every text pairing in both themes
+including corrupted and truncated payloads, the readings of the machine against
+the shapes PowerShell returns when it finds nothing, and every text pairing in
+both themes
 against WCAG AA.
 
 The freehand lane carries its own set, because with no catalogue the things
