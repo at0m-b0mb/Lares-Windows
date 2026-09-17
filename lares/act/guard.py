@@ -260,6 +260,52 @@ DANGEROUS_RULES: tuple[Rule, ...] = (
     Rule("scheduled-persistence",
          _rx(r"\bRegister-ScheduledTask\b|\bschtasks(\.exe)?\s+/create\b"),
          "creates a scheduled task, which is a persistence mechanism Lares does not need"),
+
+    # -- things a tool that hardens a machine never does ----------------
+    #
+    # Everything below this line is refused on the same principle as the rest
+    # of the list, applied to the other direction: these are not catastrophes,
+    # they are the specific moves an attacker makes, and a program whose whole
+    # job is to reduce a machine's attack surface has no legitimate reason to
+    # perform any of them.
+    #
+    # They matter most in the freehand lane. The reading handed to the model
+    # contains service display names, installed product names and file paths,
+    # and those are strings an attacker can choose - malware picks its own
+    # DisplayName. Telling the model to treat that reading as data is
+    # necessary and is done, but it is an instruction to a 1.5B model, and an
+    # instruction is not a control. These rules hold whether the model was
+    # persuaded or not.
+    Rule("create-user",
+         _rx(r"\bNew-LocalUser\b|\bnet\s+user\b[^\n]*\s/add\b"),
+         "creates a local account, which hardening never requires",
+         absolute=True),
+    Rule("grant-admin",
+         _rx(r"\bAdd-LocalGroupMember\b[^\n]*Administrators|"
+             r"\bnet\s+localgroup\b[^\n]*Administrators[^\n]*\s/add\b"),
+         "grants administrator rights to an account",
+         absolute=True),
+    Rule("antivirus-exclusion",
+         _rx(r"\b(Add|Set)-MpPreference\b[^\n]*-Exclusion"),
+         "adds an antivirus exclusion, which is how protection is blinded "
+         "rather than improved",
+         absolute=True),
+    Rule("clear-event-log",
+         _rx(r"\bwevtutil(\.exe)?\s+(cl|clear-log)\b|\bClear-EventLog\b|"
+             r"\bRemove-EventLog\b"),
+         "erases an event log, destroying the record of what happened",
+         absolute=True),
+    Rule("remote-shell",
+         _rx(r"System\.Net\.Sockets\.(TCPClient|TcpListener)|"
+             r"\bNew-PSSession\b|\bEnter-PSSession\b"),
+         "opens a network session from the machine it is meant to be securing"),
+    Rule("open-inbound",
+         # Not absolute: undoing a rule Lares added to *close* something can
+         # legitimately mean allowing it again.
+         _rx(r"\bNew-NetFirewallRule\b(?=[^\n]*-Direction\s+Inbound)"
+             r"(?=[^\n]*-Action\s+Allow)|"
+             r"netsh\s+advfirewall\s+firewall\s+add\s+rule[^\n]*action=allow"),
+         "opens an inbound hole in the firewall"),
 )
 
 

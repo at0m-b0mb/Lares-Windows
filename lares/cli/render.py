@@ -13,6 +13,7 @@ exactly the machine that most needs hardening.
 from __future__ import annotations
 
 import contextlib
+import re
 import shutil
 import sys
 from typing import Any, Iterator
@@ -59,6 +60,32 @@ STATUS_WORD = {
 }
 
 
+#: Every C0 and C1 control character except the tab, which is ordinary in a
+#: script body. ESC is the one that matters: it opens the sequences that move
+#: the cursor, clear the screen and change colour.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def safe(text: str, *, keep_newlines: bool = False) -> str:
+    """Strip terminal control sequences from text this program did not write.
+
+    Almost everything Lares prints came off the machine it is inspecting -
+    service display names, product names, file paths, registry values - and
+    those are strings somebody else chose. Malware names itself.
+
+    Printed raw, a display name of "Backup Agent\x1b[2J\x1b[H\x1b[32m
+    EVERYTHING IS FINE" clears the terminal and writes a reassuring line in
+    green. In a program whose entire output is a security report that people
+    act on, letting the subject of the report control the report is the whole
+    problem, and it costs one regex to close.
+
+    Newlines are kept only where the caller is about to split on them itself.
+    In a single-line field a newline is another forged line.
+    """
+    cleaned = _CONTROL.sub("", text)
+    return cleaned if keep_newlines else cleaned.replace("\n", " ").replace("\r", " ")
+
+
 class Console:
     """Terminal writer with a rich path and a plain path."""
 
@@ -72,6 +99,7 @@ class Console:
     # -- primitives -----------------------------------------------------
 
     def _write(self, text: str, style: str = "") -> None:
+        text = safe(text)
         if self._rich and style:
             self._rich.print(Text(text, style=style))
         elif self._rich:
@@ -305,8 +333,11 @@ class Console:
             self._raw("\n")
 
     def _raw(self, text: str) -> None:
+        # Model output, which is shaped by the machine data in its prompt, so
+        # it is no more trusted than the reading was. Newlines survive because
+        # the reply is JSON and its line breaks are real.
         try:
-            sys.stdout.write(text)
+            sys.stdout.write(safe(text, keep_newlines=True))
             sys.stdout.flush()
         except (OSError, ValueError, UnicodeEncodeError):
             pass
@@ -324,7 +355,7 @@ class Console:
 
         def update(text: str = "") -> None:
             if text:
-                state["text"] = text
+                state["text"] = safe(text)
             sys.stdout.write(f"\r  {state['text'][:70]:<72}")
             sys.stdout.flush()
 

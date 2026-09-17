@@ -27,7 +27,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -204,12 +203,42 @@ def powershell_exe() -> str:
     5.1 is the one guaranteed to exist on every supported Windows build and it
     carries the full set of management modules Lares depends on. pwsh is only
     used when 5.1 is genuinely absent.
+
+    Every candidate is an absolute path under a directory only an administrator
+    can write to, and a relative answer is refused outright. That is not
+    fussiness. ``shutil.which`` on Windows searches the **current directory
+    first** - CPython inserts ``os.curdir`` ahead of PATH - so an earlier
+    version of this function would, if System32 could not be read, run
+    whatever ``powershell.exe`` happened to sit beside the file someone had
+    just double-clicked. Lares runs as administrator. A tool that hardens a
+    machine must not be the thing that hands a writable download folder a
+    SYSTEM shell.
     """
     if IS_WINDOWS:
-        system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
-        candidate = system32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        if candidate.exists():
-            return str(candidate)
+        root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        candidates = [
+            root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+            # A 32-bit process on 64-bit Windows is redirected away from the
+            # real System32; SysNative is the door back to it.
+            root / "SysNative" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+            root / "SysWOW64" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+        ]
+        for program_files in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+            base = os.environ.get(program_files)
+            if base:
+                candidates.append(Path(base) / "PowerShell" / "7" / "pwsh.exe")
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return str(candidate)
+            except OSError:
+                continue
+        # Nothing was found where it is supposed to be. Say so rather than
+        # searching a path an attacker may be standing in; run() reports a
+        # missing binary cleanly, and a scan that cannot find PowerShell is a
+        # far better outcome than one that finds the wrong one.
+        return str(candidates[0])
+
     found = shutil.which("powershell") or shutil.which("pwsh")
     return found or "powershell.exe"
 
@@ -255,19 +284,19 @@ def powershell_json(script: str, timeout: int = DEFAULT_TIMEOUT):
     return powershell(body, timeout=timeout).json(default=None)
 
 
-def script_file(script: str, suffix: str = ".ps1") -> Path:
-    """Write a script to a private temp file and return its path.
-
-    Used for remediation bodies, which are long enough that an encoded command
-    becomes unwieldy and which we want to keep on disk for the journal.
-    """
-    fd, name = tempfile.mkstemp(suffix=suffix, prefix="lares-")
-    with os.fdopen(fd, "w", encoding="utf-8-sig") as fh:
-        fh.write(script)
-    path = Path(name)
-    if not IS_WINDOWS:
-        path.chmod(0o600)
-    return path
+# script_file() lived here: it wrote a script to a temp file and handed back the
+# path. Nothing called it. Its docstring described a design that was not the one
+# that shipped - every script goes through powershell() as a base64
+# -EncodedCommand, which never touches the filesystem at all.
+#
+# It is deleted rather than kept for later because of what it was. A privileged
+# process that writes a script to a shared temp directory and then runs it by
+# path has a window between the two where another user can replace the file,
+# and on Windows an elevated process inherits a TEMP that is not always its
+# own. Leaving that primitive lying around for a future caller to reach for is
+# how that bug gets written. If a script ever genuinely needs to be on disk, it
+# belongs in a directory this process creates with an explicit DACL, and that
+# decision should be made deliberately rather than inherited from dead code.
 
 
 # --------------------------------------------------------------------------

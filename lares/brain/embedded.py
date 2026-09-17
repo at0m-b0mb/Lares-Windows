@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -116,6 +117,20 @@ def read_footer(path: Path) -> Payload | None:
             fh.seek(name_offset)
             name = fh.read(name_len).decode("utf-8", errors="replace")
 
+        if not safe_filename(name):
+            # The name decides where the payload is written, so it is the one
+            # field in this footer that can reach outside the cache directory.
+            # Refusing the whole payload is the right answer rather than
+            # sanitising the name: a footer asking to be written to
+            # System32 is not a filename problem to be cleaned up, it is a
+            # hostile executable, and Lares then runs without an embedded
+            # model rather than writing what it was told to.
+            logs.get().error(
+                "model", "This executable's payload asked to be written "
+                         "outside the model cache; refusing it",
+                exc=ValueError(f"unsafe payload name {name[:120]!r}"))
+            return None
+
         return Payload(name=name, size=length, sha256=digest.hex(), offset=payload_offset)
     except (OSError, struct.error, ValueError):
         return None
@@ -137,7 +152,59 @@ def cache_dir() -> Path:
     return state_dir("models")
 
 
+#: Windows treats these as devices wherever they appear as a filename stem, so
+#: a payload called "CON.gguf" would not be a file at all.
+_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{n}" for n in range(1, 10)),
+    *(f"LPT{n}" for n in range(1, 10)),
+}
+
+#: Deliberately narrow. This names a GGUF file that upstream publishes, not an
+#: arbitrary path, so anything outside this set is a reason to stop rather
+#: than a case to handle.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}")
+
+
+def safe_filename(name: str) -> bool:
+    """Whether *name* is a bare filename that cannot escape a directory.
+
+    The payload name arrives from data appended to the executable, which is
+    exactly the kind of input this file already treats as hostile everywhere
+    else - the offsets and the length are bounds-checked a few lines above.
+    The name was not, and it is the field that decides where a gigabyte gets
+    written by a process running as administrator.
+
+    ``Path("C:/cache") / "C:/Windows/System32/x.dll"`` is
+    ``C:/Windows/System32/x.dll``: an absolute component discards everything
+    to its left. So a crafted footer could write its payload anywhere the
+    process can reach, and the integrity check is no defence at all, because
+    whoever wrote the name also wrote the hash it is checked against.
+    """
+    if not name or name != name.strip():
+        return False
+    if not _SAFE_NAME.fullmatch(name):
+        return False
+    if name in (".", ".."):
+        return False
+    # Path treats both separators on Windows, so both are refused everywhere.
+    if "/" in name or "\\" in name or ":" in name:
+        return False
+    if name.split(".")[0].upper() in _RESERVED:
+        return False
+    return True
+
+
 def cached_path(payload: Payload) -> Path:
+    """Where this payload is unpacked to.
+
+    The name is re-checked here rather than trusted from read_footer. This is
+    the function whose return value gets opened for writing, and a second
+    check costs nothing next to being wrong about which of two callers
+    validated first.
+    """
+    if not safe_filename(payload.name):
+        raise ValueError(f"unsafe payload name: {payload.name[:120]!r}")
     return cache_dir() / payload.name
 
 

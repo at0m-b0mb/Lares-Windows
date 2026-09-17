@@ -506,18 +506,61 @@ a different program — see [The freehand lane](#the-freehand-lane).
   pattern before anything runs — in the catalogue, in the Expert lane, and in
   the freehand lane, which is the one thing that lane does not leave to the
   model.
+- **Create an account, grant administrator rights, add an antivirus exclusion,
+  clear an event log, open an inbound firewall port, or open a network session
+  from the machine.** Not catastrophes — these are the specific moves an
+  attacker makes, and a program whose job is to shrink a machine's attack
+  surface has no legitimate reason to perform any of them. Creating an admin
+  and blinding the antivirus are refused even in a rollback.
 - Delete a stored credential and claim it can put it back. `IDN-004` clears a
   clear-text autologon password and is marked irreversible, because keeping a
   copy of a password in order to restore it is not something this will do.
 - Tell you your machine is secure. The best verdict is *nothing outstanding*,
   which means thirty specific checks passed.
 
+## Security of Lares itself
+
+A tool that runs PowerShell as administrator, unpacks a payload from its own
+binary and acts on a language model's output is worth attacking, so it gets
+audited like one. What follows is what a pass over the codebase found, stated
+plainly rather than summarised away. All of it is fixed, and each has a test
+written as the attack rather than as an assertion about the implementation.
+
+| | |
+|---|---|
+| **Arbitrary file write as administrator** | The embedded model's filename is read from a footer appended to the executable, and it was used to build a path with no validation. `Path("C:/cache") / "C:/Windows/System32/x.dll"` is the System32 path — an absolute component discards everything to its left — so a crafted binary could write its payload anywhere the process could reach. The SHA-256 check was no defence: whoever wrote the name also wrote the hash. Now the name must be a bare filename, checked where it is read and again where it is opened. |
+| **Untrusted search path** | `shutil.which` on Windows searches the *current directory first* — CPython inserts `os.curdir` ahead of PATH. If System32 could not be read, Lares would have run whatever `powershell.exe` sat beside the file someone had just double-clicked, as administrator. The Windows path now only accepts absolute candidates under `%SystemRoot%` and Program Files, and reports a missing binary rather than searching. |
+| **Prompt injection into the code-writing prompt** | The prompt that *assesses* the machine told the model to treat the reading as data. The prompt that *writes PowerShell* did not — exactly backwards, since assessment mislabels and remediation executes. Service display names and installed product names are strings an attacker chooses; malware names itself. The rule is now in both prompts and the reading is fenced. More importantly, the six refusals above were added, because an instruction to a 1.5B model is not a control. |
+| **Terminal output forgery** | A service named `Backup Agent\e[2J\e[H\e[32mEVERYTHING IS FINE` cleared the terminal and printed a reassuring line in green. In a program whose whole output is a security report people act on, letting the subject of the report control the report is the entire problem. All output is stripped of control sequences; a newline in a single-line field is refused too, because that forges a whole line. |
+| **Dead write-then-execute primitive** | An unused function wrote a script to a shared temp directory and returned the path. Nothing called it, and its docstring described a design that never shipped. Deleted rather than kept — a privileged process that writes a script and then runs it by path has a window where another user can replace the file, and leaving that lying around is how the bug gets written later. |
+
+What the same pass found already correct, for what it is worth: every
+subprocess is an argument vector with `shell=False`; YAML is `safe_load`; the
+model download enforces HTTPS before *and after* redirects, hashes to a `.part`
+file and renames atomically; the installer verifies every binary against the
+published `SHA256SUMS`; the HTML report escapes every machine-derived value;
+state lives in the per-user profile; and a crash report carries version,
+platform and architecture but no username, hostname or environment, so it is
+safe to paste into an issue.
+
+Two things are worth knowing rather than fixing. The installer puts the
+binaries in `%LOCALAPPDATA%\Programs\Lares`, which your own user account can
+write to and which you then run as administrator — that is how every per-user
+install works, and if you would rather the binary were protected from your own
+account, install it under Program Files instead. And the binaries are not
+code-signed, so the hash in `SHA256SUMS.txt` is what you have; the integrity
+check inside the executable catches corruption, not a determined forger.
+
+Found something? Open an issue. If it is the kind of thing that should not be
+public first, say so in the issue without the detail and I will find a way to
+take it privately.
+
 ## Status, stated plainly
 
-**v0.6.0. The engine is tested. Most of the PowerShell has run once, on one machine.**
+**v0.6.1. The engine is tested. Most of the PowerShell has run once, on one machine.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **539 tests** that run on Windows
+loader, the logging, the theme — is covered by **586 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 The PowerShell is a different matter, and the honest position has three parts:
@@ -571,7 +614,7 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-539 tests, none of which need Windows. They cover the guard against injection
+586 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay
