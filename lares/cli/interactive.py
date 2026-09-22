@@ -102,6 +102,10 @@ ITEMS: list[tuple[str, str, list[str]]] = [
      "Installed software and versions, every listening port, services, "
      "accounts. Read-only, and it needs no model.",
      ["surface"]),
+    ("Did it stay fixed?",
+     "Re-checks every change Lares made, and shows what else moved on this "
+     "machine since it last looked.",
+     ["drift"]),
     ("What has it changed?",
      "Every change made to this machine, and how to put one back.",
      ["journal"]),

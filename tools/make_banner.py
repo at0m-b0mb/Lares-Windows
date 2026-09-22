@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Draw the repository banner and the application icon.
 
-The motif is the product's own signature element rather than a generic shield:
-The Watch, the row of columns showing a machine's backlog of findings coming
-down cycle after cycle. It is the one picture that says what Lares does.
+The motif is the product's own signature element rather than a generic shield
+or padlock: The Watch, the row of columns showing a machine's backlog of
+findings coming down cycle after cycle - and then flattening, not at zero, but
+at the handful of things that need a person. That floor is the honest part of
+the picture and the reason this motif is worth drawing at all. It is the one
+image only this program could produce, because it is made of what the program
+produces.
 
-Colours are read from the same theme module the desktop application uses, so the
-banner cannot drift away from the product it is advertising.
+Two banners come out, light and true-black, because GitHub renders the README
+in the reader's own colour scheme and a light-only banner is a white slab to
+half the people who open the page.
+
+Colours mirror lares/gui/theme.py so the banner cannot advertise a product it
+no longer looks like; tests/test_theme.py asserts they still match.
 
     python tools/make_banner.py
 """
@@ -28,22 +36,40 @@ from lares.version import NAME, TAGLINE  # noqa: E402
 
 OUT = ROOT / "assets"
 
-# Taken from lares/gui/theme.py. Kept as literals here so the banner can be
-# drawn without starting Qt; the test suite asserts they still match.
-PAPER = "#F3F1EC"
-CARD = "#FFFFFF"
-INK = "#1A1916"
-MUTED = "#6B6558"
-RULE = "#DDD8CD"
-BRASS = "#7C5F10"
-SHINE = "#A0811F"
 
-#: A machine being looked after: the open count falling, then flattening at the
-#: handful of findings that need a person. Pairs are (open, fixed).
+class Palette:
+    """One theme's colours, named as lares/gui/theme.py names them.
+
+    Held as literals rather than imported so the banner can be drawn without
+    starting Qt, which theme.py needs only to resolve a font family. The drift
+    that invites is caught by a test rather than shipped.
+    """
+
+    def __init__(self, paper: str, card: str, ink: str, ink_soft: str,
+                 muted: str, rule: str, brass: str, shine: str) -> None:
+        self.paper, self.card = paper, card
+        self.ink, self.ink_soft, self.muted = ink, ink_soft, muted
+        self.rule, self.brass, self.shine = rule, brass, shine
+
+
+LIGHT = Palette(paper="#F3F1EC", card="#FFFFFF", ink="#1A1916",
+                ink_soft="#4A463D", muted="#6B6558", rule="#DDD8CD",
+                brass="#7C5F10", shine="#A0811F")
+
+#: True black. Nothing in the dark theme may read as navy.
+DARK = Palette(paper="#000000", card="#121212", ink="#ECEAE4",
+               ink_soft="#B8B3A9", muted="#8A857B", rule="#2A2A2A",
+               brass="#D4A73A", shine="#E8C468")
+
+#: A machine being looked after, cycle by cycle. Pairs are (open, closed).
 STORY = [
     (28, 8), (20, 8), (12, 3), (9, 2), (7, 1), (6, 1),
     (5, 0), (5, 0), (5, 0), (5, 0), (5, 0), (5, 0),
 ]
+
+#: Where the story stops falling. Drawn, so the flat tail reads as a deliberate
+#: floor rather than as the agent having given up.
+FLOOR = 5
 
 FONT_DIRS = [
     "/System/Library/Fonts/Supplemental",
@@ -70,88 +96,116 @@ def font(files: list[str], size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default(size)
 
 
-def draw_watch(draw: ImageDraw.ImageDraw, x: int, y: int, width: int, height: int,
-               gap: int = 7) -> None:
-    """The Watch motif: open findings as column height, fixed as gold at the base."""
-    n = len(STORY)
-    bar = (width - gap * (n - 1)) / n
-    peak = max(o for o, _ in STORY)
+def draw_watch(draw: ImageDraw.ImageDraw, pal: Palette, x: int, y: int,
+               width: int, height: int, gap: int = 7) -> None:
+    """Open findings as column height, closed as brass at the base."""
+    count = len(STORY)
+    bar = (width - gap * (count - 1)) / count
+    peak = max(open_count for open_count, _ in STORY)
 
-    draw.line([(x, y + height), (x + width, y + height)], fill=RULE, width=1)
+    # Drawn in muted rather than rule. At rule weight the dashes vanish into
+    # the card in both themes, which left the caption underneath pointing at
+    # a line nobody could see.
+    floor_y = y + height - height * (FLOOR / peak)
+    for dash in range(0, int(width), 8):
+        draw.line([(x + dash, floor_y), (x + min(dash + 3, width), floor_y)],
+                  fill=pal.muted, width=1)
 
-    for index, (open_count, fixed) in enumerate(STORY):
+    draw.line([(x, y + height), (x + width, y + height)], fill=pal.rule, width=1)
+
+    for index, (open_count, closed) in enumerate(STORY):
         left = x + index * (bar + gap)
         column = height * (open_count / peak)
-        top = y + height - column
-        draw.rectangle([left, top, left + bar, y + height], fill=RULE)
-        if fixed:
-            closed = column * min(1.0, fixed / open_count)
-            draw.rectangle([left, y + height - closed, left + bar, y + height],
-                           fill=SHINE)
+        draw.rectangle([left, y + height - column, left + bar, y + height],
+                       fill=pal.rule)
+        if closed:
+            filled = column * min(1.0, closed / open_count)
+            draw.rectangle([left, y + height - filled, left + bar, y + height],
+                           fill=pal.shine)
 
 
-def banner() -> Path:
-    W, H = 1280, 400
-    image = Image.new("RGB", (W, H), PAPER)
+def banner(pal: Palette, filename: str) -> Path:
+    width, height = 1280, 400
+    image = Image.new("RGB", (width, height), pal.paper)
     draw = ImageDraw.Draw(image)
 
-    # A white card inset on the paper, the same relationship the interface uses.
     margin = 36
-    draw.rectangle([margin, margin, W - margin, H - margin], fill=CARD, outline=RULE)
-    # The brass rule down the left edge, as on an accented card.
-    draw.rectangle([margin, margin, margin + 3, H - margin], fill=BRASS)
+    draw.rectangle([margin, margin, width - margin, height - margin],
+                   fill=pal.card, outline=pal.rule)
+    draw.rectangle([margin, margin, margin + 3, height - margin], fill=pal.brass)
 
     serif = font(SERIF_FILES, 92)
     sans = font(SANS_FILES, 23)
     small = font(SANS_FILES, 17)
+    tiny = font(SANS_FILES, 15)
 
     left = margin + 54
-    draw.text((left, 104), NAME, font=serif, fill=INK)
-    draw.text((left + 4, 214), TAGLINE, font=sans, fill=MUTED)
-    draw.text((left + 4, 252),
+    draw.text((left, 92), NAME, font=serif, fill=pal.ink)
+    draw.text((left + 4, 202), TAGLINE, font=sans, fill=pal.ink_soft)
+    draw.text((left + 4, 240),
               "It decides with a local model, fixes what it can undo, "
               "and puts back anything that made the machine worse.",
-              font=small, fill=MUTED)
+              font=small, fill=pal.muted)
 
-    draw_watch(draw, W - margin - 330, 116, 268, 118)
-    draw.text((W - margin - 330, 246), "THE WATCH", font=small, fill=BRASS)
-    draw.text((W - margin - 330, 270), "one column per cycle", font=small, fill=MUTED)
+    # The three programs as a line of type rather than three boxes. What
+    # separates them is a sentence, so it is set as one.
+    rule_y = 294
+    draw.line([(left + 4, rule_y), (left + 640, rule_y)], fill=pal.rule, width=1)
+    draw.text((left + 4, rule_y + 15),
+              "TERMINAL    DESKTOP    FREEHAND", font=tiny, fill=pal.brass)
+    draw.text((left + 4, rule_y + 37),
+              "the third has no catalogue - the model writes every fix itself",
+              font=tiny, fill=pal.muted)
+
+    watch_x, watch_w = width - margin - 330, 268
+    draw_watch(draw, pal, watch_x, 108, watch_w, 116)
+    draw.text((watch_x, 238), "THE WATCH", font=small, fill=pal.brass)
+    draw.text((watch_x, 262), "one column per cycle, brass is what it closed",
+              font=tiny, fill=pal.muted)
+    draw.text((watch_x, 283), "the floor is what needs a person",
+              font=tiny, fill=pal.muted)
 
     OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / "banner.png"
+    path = OUT / filename
     image.save(path)
     return path
 
 
-def icon() -> Path:
-    """A square mark: the Watch reduced to five columns."""
-    S = 512
-    image = Image.new("RGB", (S, S), PAPER)
+def icon(pal: Palette = LIGHT) -> Path:
+    """A square mark: the Watch reduced to five columns.
+
+    Always light. This becomes lares.ico, and a Windows taskbar icon has no
+    way to follow the reader's colour scheme.
+    """
+    size = 512
+    image = Image.new("RGB", (size, size), pal.paper)
     draw = ImageDraw.Draw(image)
 
     inset = 44
-    draw.rectangle([inset, inset, S - inset, S - inset], fill=CARD, outline=RULE, width=3)
+    draw.rectangle([inset, inset, size - inset, size - inset],
+                   fill=pal.card, outline=pal.rule, width=3)
 
     bars = [(1.0, 0.28), (0.74, 0.34), (0.5, 0.4), (0.34, 0.22), (0.28, 0.0)]
-    width, gap = 46, 22
-    total = len(bars) * width + (len(bars) - 1) * gap
-    x = (S - total) / 2
-    base = S - inset - 64
-    tallest = S - 2 * inset - 150
+    bar_width, gap = 46, 22
+    total = len(bars) * bar_width + (len(bars) - 1) * gap
+    x = (size - total) / 2
+    base = size - inset - 64
+    tallest = size - 2 * inset - 150
 
-    for fraction, fixed in bars:
+    for fraction, closed in bars:
         column = tallest * fraction
-        draw.rectangle([x, base - column, x + width, base], fill=RULE)
-        if fixed:
-            draw.rectangle([x, base - column * fixed, x + width, base], fill=SHINE)
-        x += width + gap
+        draw.rectangle([x, base - column, x + bar_width, base], fill=pal.rule)
+        if closed:
+            draw.rectangle([x, base - column * closed, x + bar_width, base],
+                           fill=pal.shine)
+        x += bar_width + gap
 
-    draw.rectangle([inset, base + 18, S - inset, base + 24], fill=BRASS)
+    draw.rectangle([inset, base + 18, size - inset, base + 24], fill=pal.brass)
 
     path = OUT / "icon.png"
     image.save(path)
-    for size in (256, 128, 64, 32):
-        image.resize((size, size), Image.LANCZOS).save(OUT / f"icon-{size}.png")
+    for edge in (256, 128, 64, 32):
+        image.resize((edge, edge), Image.LANCZOS).save(OUT / f"icon-{edge}.png")
     image.resize((256, 256), Image.LANCZOS).save(
         OUT / "lares.ico", format="ICO",
         sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
@@ -159,6 +213,7 @@ def icon() -> Path:
 
 
 if __name__ == "__main__":
-    print(f"  {banner().relative_to(ROOT)}")
+    for palette, name in ((LIGHT, "banner.png"), (DARK, "banner-dark.png")):
+        print(f"  {banner(palette, name).relative_to(ROOT)}")
     print(f"  {icon().relative_to(ROOT)}")
     print("  assets/icon-{256,128,64,32}.png, assets/lares.ico")

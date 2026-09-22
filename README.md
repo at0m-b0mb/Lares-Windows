@@ -1,6 +1,9 @@
 <div align="center">
 
-![Lares](assets/banner.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.png">
+  <img alt="Lares" src="assets/banner.png">
+</picture>
 
 **An autonomous Windows hardening agent with a language model running on the machine itself.**
 
@@ -8,9 +11,12 @@ It looks at what the machine is, decides what to do about it, fixes what it can
 undo, verifies that the fix worked, and puts back anything that made things
 worse. No prompts, no dialogs, no cloud, no account.
 
-[Install](#install) · [Two applications](#two-applications) ·
-[How it decides](#how-it-decides) · [Why you can leave it running](#why-you-can-leave-it-running) ·
+[Install](#install) · [Three applications](#three-applications) ·
+[How it decides](#how-it-decides) · [The freehand lane](#the-freehand-lane) ·
+[Did it stay fixed?](#did-it-stay-fixed) ·
+[Why you can leave it running](#why-you-can-leave-it-running) ·
 [What it writes down](#what-it-writes-down) · [The model](#the-model) ·
+[Security of Lares itself](#security-of-lares-itself) ·
 [Will it run here?](#will-it-run-on-my-machine) · [What it will not do](#what-it-will-not-do)
 
 </div>
@@ -318,6 +324,10 @@ off the interface thread so the window stays usable while six PowerShell
 collectors run. A count it did not take reads `not read` rather than `0` —
 those are the same number and completely different facts.
 
+Every reading is kept, so the interesting question becomes available: not what
+is listening, but **what started listening since last time**. See
+[Did it stay fixed?](#did-it-stay-fixed).
+
 ### What is still not the model's to decide
 
 One thing: a blocklist of operations that will not run whoever wrote them.
@@ -364,6 +374,60 @@ rather than a promise about it: the release job fails if a control id can be
 found anywhere in its output.
 
 [rel]: https://github.com/at0m-b0mb/Lares-Windows/releases/latest
+
+## Did it stay fixed?
+
+A hardening tool that fixes something once and never looks again is half a
+tool. Machines drift. An installer re-enables a protocol. A policy refresh
+overwrites a registry value at three in the morning. Somebody turns the
+firewall off to make a printer work and forgets.
+
+None of that shows up in a scan, because a scan reports the machine's *state*
+and not its *history* — a control fixed in March that came undone in April
+reads as "open", indistinguishable from one that was never touched. The
+difference matters. Never fixed is work. **Fixed and came undone** is either
+something on this machine actively fighting the change, or a change that never
+held in the first place, and both are worth knowing before it is applied for
+the fourth time.
+
+```powershell
+lares drift          # what came undone, and what else moved here
+lares drift --fix    # re-apply exactly what came undone, nothing else
+```
+
+It answers two questions, because that is how a person asks them.
+
+**Did what Lares did hold?** It reads the journal for every control it left in
+place and re-runs that control's own detection probe — the same probe that
+found the problem and the same one that verified the fix. Three states, and it
+refuses to guess between them: *held*, *came undone*, and *could not be
+re-checked*. That third one is a state on purpose. Folding it into either of the
+others is how a security tool ends up lying in one direction.
+
+A control that has come undone more than once says so, because that is the
+strongest signal available: it did not hold the last three times either.
+
+**What else moved?** Every reading of the attack surface is kept — automatically,
+by the agent, at most twice a day — and any two can be compared:
+
+```
+ports     TCP/4444 on 0.0.0.0 appeared (nc)
+ports     TCP/22 on 0.0.0.0 is gone
+accounts  svc-backup: enabled -> enabled, administrator
+software  Google Chrome: 109.0.5414.120 -> 120.0.6099.110
+exposure  smbv1: disabled -> ENABLED
+```
+
+The comparison is deliberately dumb: no severity, no thresholds, no alerting.
+A new listening port is a fact; whether it matters is the model's problem, or
+yours. Two details are load-bearing anyway. A version change is **one change**,
+not a removal and an addition — getting that wrong turns every Patch Tuesday
+into forty findings, which is how a change report becomes something nobody
+reads. And a view that could not be read is reported as *not compared* rather
+than as *nothing changed*, because silence that looks like an all-clear is the
+worst answer available.
+
+Neither half needs the model, and neither changes anything without `--fix`.
 
 ## Why you can leave it running
 
@@ -560,7 +624,7 @@ take it privately.
 **v0.6.1. The engine is tested. Most of the PowerShell has run once, on one machine.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **586 tests** that run on Windows
+loader, the logging, the theme — is covered by **636 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 The PowerShell is a different matter, and the honest position has three parts:
@@ -614,7 +678,7 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-586 tests, none of which need Windows. They cover the guard against injection
+636 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay

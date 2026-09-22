@@ -198,6 +198,12 @@ def cmd_surface(args: argparse.Namespace, console: Console) -> int:
     else:
         found = surface_mod.survey(only=only)
 
+    # Recorded here as well as in the cycle: someone who runs this by hand is
+    # building the history that 'lares drift' reads, whether they meant to or
+    # not. Demo readings are refused by save() itself.
+    from ..sense import baseline as baseline_mod
+    baseline_mod.save(found)
+
     if args.json:
         print(dumps({
             "at": found.at,
@@ -246,6 +252,98 @@ def cmd_surface(args: argparse.Namespace, console: Console) -> int:
     console.blank()
     console.dim("Nothing was changed. To have a model act on this, use "
                 "lares-freehand.")
+    return 0
+
+
+def cmd_drift(args: argparse.Namespace, console: Console) -> int:
+    """What changed on this machine since Lares last looked.
+
+    Two questions, asked together because that is how a person asks them.
+    Did the changes Lares made hold? And what else moved - a port that was not
+    listening before, an account that is an administrator now, a setting that
+    went back the way it was?
+
+    The first needs the journal and the controls' own probes. The second needs
+    a previous reading of the attack surface, which is recorded every time one
+    is taken. Neither needs the model, and neither changes anything.
+    """
+    from ..sense import baseline as baseline_mod
+    from ..sense import drift as drift_mod
+    from ..sense import surface as surface_mod
+
+    catalog = loader.load()
+    console.rule(f"Lares {VERSION} - what changed")
+    console.blank()
+
+    # -- half one: did what Lares did hold? -----------------------------
+    console.section("Changes Lares made")
+    with console.status("Re-checking") as status:
+        report = drift_mod.check(
+            catalog, progress=lambda cid, i, n: status(f"{cid} ({i}/{n})"))
+
+    verdict, detail = report.headline()
+    console.verdict(verdict, detail)
+    console.blank()
+
+    if report.checked:
+        for entry in report.undone:
+            console.finding("undone", entry.control_id, entry.title, "")
+            console.detail(entry.detail)
+            if entry.repeated:
+                console.detail(f"applied {entry.applications} times before now - "
+                               "something on this machine is putting it back")
+        for state, word in ((drift_mod.UNKNOWN, "could not be re-checked"),
+                            (drift_mod.GONE, "no longer in the catalogue")):
+            for entry in report.of(state):
+                console.bullet(f"{entry.control_id}: {word} - {entry.detail}")
+        held = report.of(drift_mod.HELD)
+        if held:
+            console.ok(f"{len(held)} change(s) are still in place.")
+
+    # -- half two: what else moved? -------------------------------------
+    console.blank()
+    console.section("The machine itself")
+
+    previous = baseline_mod.latest()
+    with console.status("Reading") as status:
+        now = surface_mod.survey(progress=status)
+
+    saved = baseline_mod.save(now)
+    if previous is None:
+        console.paragraph(
+            "There is no earlier reading to compare against. This one has been "
+            "recorded, so the next run of this command will have something to "
+            "say." if saved else
+            "There is no earlier reading to compare against, and this one was "
+            "not recorded - demo mode records nothing.")
+    else:
+        comparison = baseline_mod.compare(previous, now)
+        console.field("Compared against", previous.at.replace("T", " ")[:19])
+        console.blank()
+        if comparison.quiet:
+            console.ok("Nothing changed in any view that could be compared.")
+        for section, changes in comparison.by_section().items():
+            console.section(f"  {section}")
+            for change in changes:
+                console.bullet(change.describe())
+        for section, why in comparison.skipped.items():
+            console.warn(f"{section}: {why}")
+
+    console.blank()
+    if report.undone and not args.fix:
+        console.dim("Add --fix to re-apply what came undone, or run "
+                    "'lares run' to let the model decide about all of it.")
+    elif report.undone and args.fix:
+        console.blank()
+        console.section("Re-applying what came undone")
+        settings = _settings_from(args, console)
+        agent, note = build(settings, catalog, listener=_make_listener(console),
+                            with_model=False)
+        console.field("Deciding", "nothing - re-applying exactly what the "
+                                  "journal says was applied before")
+        cycle = agent.run_cycle(only=[d.control_id for d in report.undone])
+        _show_cycle(console, cycle, catalog)
+
     return 0
 
 
@@ -919,6 +1017,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="every row, rather than the first 25 of each")
     p.add_argument("--json", action="store_true", help="print it as JSON")
     p.set_defaults(func=cmd_surface)
+
+    p = sub.add_parser("drift",
+                       help="what came undone, and what else changed here")
+    common(p)
+    p.add_argument("--fix", action="store_true",
+                   help="re-apply the changes that came undone")
+    p.set_defaults(func=cmd_drift)
 
     p = sub.add_parser("plan", help="show what it would do, and why")
     common(p)

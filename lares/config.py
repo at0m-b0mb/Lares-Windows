@@ -7,7 +7,7 @@ about what the agent is allowed to do.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from pathlib import Path
 
 from .core import RiskTier
@@ -82,8 +82,42 @@ class Settings:
             return RiskTier.CAUTION
 
     def validate(self) -> list[str]:
-        """Clamp anything out of range, returning what was corrected."""
+        """Clamp anything out of range or of the wrong type.
+
+        Returns what was corrected, so a caller can say so rather than
+        silently behaving differently from what the file asked for.
+
+        Types are checked before ranges, and that order is the whole point.
+        This method exists to survive a settings file somebody edited by hand,
+        and an edit that produces ``{"budget": null}`` is far likelier than one
+        that produces ``{"budget": 9999}``. Comparing None to an integer raises
+        TypeError, so the defence against a bad settings file used to crash on
+        a bad settings file - in the CLI and in the desktop application, at
+        startup, with a traceback instead of the fallback this promises.
+        """
         fixed: list[str] = []
+
+        for name, field_ in self.__dataclass_fields__.items():
+            value = getattr(self, name)
+            wanted = field_.type
+            if isinstance(wanted, str):
+                wanted = {"int": int, "bool": bool, "str": str,
+                          "list[str]": list}.get(wanted)
+            if wanted is None:
+                continue
+            # bool is a subclass of int, so an int field holding True would
+            # pass a naive isinstance check and then compare as 1.
+            correct = (isinstance(value, bool) if wanted is bool
+                       else isinstance(value, wanted) and not isinstance(value, bool)
+                       if wanted is int else isinstance(value, wanted))
+            if not correct:
+                default = self.__class__.__dataclass_fields__[name].default
+                if default is MISSING:
+                    default = field_.default_factory()
+                fixed.append(f"{name} was {value!r}, which is not "
+                             f"{wanted.__name__}; using {default!r}")
+                setattr(self, name, default)
+
         if self.ceiling.lower() not in {t.value for t in RiskTier}:
             fixed.append(f"ceiling {self.ceiling!r} is not a risk tier; using 'caution'")
             self.ceiling = "caution"

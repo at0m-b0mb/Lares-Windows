@@ -256,3 +256,57 @@ def test_streamed_model_output_keeps_its_newlines_but_loses_its_escapes():
 def test_safe_leaves_ordinary_text_alone():
     assert safe("C:\\Program Files (x86)\\Vendor\\agent.exe") == \
         "C:\\Program Files (x86)\\Vendor\\agent.exe"
+
+
+def test_no_console_method_bypasses_the_sanitiser():
+    """The v0.6.1 fix sanitised _write() and missed five methods.
+
+    finding(), outcome(), step(), model_row() and control_row() print through
+    rich or print() directly. finding() is how `lares scan` renders a service
+    name read off the machine, so the most-used command in the program still
+    handed the report's subject control of the report.
+
+    Written structurally rather than as five more attack cases, because the
+    failure was a method that did not route through the shared path - and the
+    next one will be too.
+    """
+    import re
+
+    source = (pathlib.Path(__file__).resolve().parent.parent
+              / "lares" / "cli" / "render.py").read_text(encoding="utf-8")
+    body = source[source.index("class Console:"):]
+
+    offenders = []
+    for match in re.finditer(
+            r"    def ([a-z_][a-z_0-9]*)\(self[^)]*\)[^:]*:\n"
+            r"((?:        .*\n|\n)*?)(?=    def |\Z)", body):
+        name, code = match.group(1), match.group(2)
+        if name.startswith("_") or "str" not in match.group(0).split("\n")[0]:
+            continue
+        prints_directly = "self._rich.print(" in code or re.search(r"^\s+print\(", code, re.M)
+        sanitises = "safe(" in code or "self._write(" in code or "self.script(" in code
+        if prints_directly and not sanitises:
+            offenders.append(name)
+
+    assert not offenders, f"these print untrusted text unsanitised: {offenders}"
+
+
+@pytest.mark.parametrize("call", [
+    lambda c, h: c.finding("critical", "SVC-001", h, ""),
+    lambda c, h: c.outcome("verified", "SVC-001", h, "2026-01-01T00:00:00"),
+    lambda c, h: c.step(1, "SVC-001", h, h, "caution"),
+    lambda c, h: c.model_row(h, h, h, h, h),
+    lambda c, h: c.control_row(h, "high", h, h, h),
+])
+def test_every_row_renderer_declaws_a_hostile_name(call):
+    out = printed(lambda c: call(c, HOSTILE))
+    assert "\x1b" not in out
+
+
+def test_an_empty_note_does_not_render_as_empty_brackets():
+    """`lares scan` and `lares demo` ended every finding with a bare "[]",
+    which reads as a value that failed to load rather than as no value."""
+    out = printed(lambda c: c.finding("high", "NET-005", "LLMNR is enabled", ""))
+    assert "[]" not in out
+    out = printed(lambda c: c.finding("high", "NET-005", "LLMNR is enabled", "fixable"))
+    assert "[fixable]" in out

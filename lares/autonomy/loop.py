@@ -33,7 +33,8 @@ from ..brain.plan import Planner
 from ..catalog.loader import Catalog
 from ..config import Settings
 from ..core import Cycle, Plan, Scan, Status, new_id, utcnow
-from ..sense import scanner
+from ..sense import baseline, scanner
+from ..sense import surface as surface_mod
 from ..winsys import is_demo, is_elevated
 from .breaker import Breaker
 
@@ -89,15 +90,23 @@ class Agent:
 
     # -- one cycle ------------------------------------------------------
 
-    def run_cycle(self) -> Cycle:
-        """Do one full pass. Never raises."""
+    def run_cycle(self, only: list[str] | None = None) -> Cycle:
+        """Do one full pass. Never raises.
+
+        *only* narrows the pass to named controls and is threaded all the way
+        down to the scanner, so a narrowed cycle runs exactly those probes
+        rather than running all thirty and discarding most of the answers.
+        'lares drift --fix' uses it to re-apply what came undone without
+        touching anything else on the machine.
+        """
         cycle_id = new_id("cyc")
         log = logs.get()
         log.info("cycle", "Cycle starting", cycle=cycle_id,
                  ceiling=self.settings.ceiling, budget=self.settings.budget,
-                 dry_run=self.settings.dry_run)
+                 dry_run=self.settings.dry_run,
+                 only=",".join(only) if only else "")
         try:
-            return self._run_cycle(cycle_id)
+            return self._run_cycle(cycle_id, only=only)
         except Exception as exc:  # noqa: BLE001
             # The one place a crash is genuinely expected to be survivable. Write
             # a full report, put its id where the user will see it, trip the
@@ -117,7 +126,7 @@ class Agent:
             self.last_cycle = empty
             return empty
 
-    def _run_cycle(self, cycle_id: str) -> Cycle:
+    def _run_cycle(self, cycle_id: str, only: list[str] | None = None) -> Cycle:
         log = logs.get()
 
         # -- sense ------------------------------------------------------
@@ -125,6 +134,7 @@ class Agent:
         scan = scanner.scan(
             self.catalog,
             domains=self.settings.domains or None,
+            only=only,
             progress=lambda cid, i, n: self._emit(
                 "scan", f"Checking {cid}", progress=(i, n)),
         )
@@ -139,6 +149,20 @@ class Agent:
             for control_id, message in scan.errors.items():
                 log.warn("scan", f"Probe {control_id} could not be read",
                          cycle=cycle_id, detail=message[:300])
+
+        # A reading of the attack surface, now and then. This is what makes
+        # 'lares drift' able to say "port 4444 started listening on Tuesday"
+        # rather than only "port 4444 is listening" - and a history nobody
+        # remembers to feed is a feature that never works. It is rate-limited
+        # rather than run every cycle because six collectors are not free on
+        # the hardware this targets.
+        if baseline.due():
+            self._emit("scan", "Recording what is on this machine")
+            try:
+                baseline.save(surface_mod.survey())
+            except Exception as exc:  # noqa: BLE001 - never lose a cycle to this
+                log.warn("scan", "Could not record the attack surface",
+                         cycle=cycle_id, detail=str(exc)[:200])
 
         elevated = is_elevated()
         halted = self.breaker.open

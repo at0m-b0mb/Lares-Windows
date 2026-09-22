@@ -10,7 +10,8 @@ Dashboard/Settings/Advanced, because those names tell you nothing about which
 one you want:
 
     Hearth     what this machine looks like right now, and the record of it
-    Exposure   what is installed, what is listening, who can log in
+    Exposure   what is installed, what is listening, who can log in -
+               and what changed since the last time it looked
     Findings   everything open, worst first
     Ledger     every change Lares has made, and the button that undoes one
     Chronicle  the activity log, the failures, and the model conversation
@@ -56,6 +57,7 @@ from ..catalog import loader
 from ..core import Cycle, RiskTier, Scan
 from ..report import write_report
 from ..sense import scanner
+from ..sense import baseline as baseline_mod
 from ..sense import surface as surface_mod
 from ..version import ETYMOLOGY, NAME, VERSION
 from ..winsys import current_user, is_demo, is_elevated
@@ -108,17 +110,31 @@ class SurveyWorker(QObject):
     """
 
     progressed = pyqtSignal(str)
-    finished = pyqtSignal(object)      # Surface
+    finished = pyqtSignal(object, object)   # Surface, Comparison | None
     failed = pyqtSignal(str)
 
     def run(self) -> None:
+        # The previous reading is loaded BEFORE this one is saved, or the
+        # comparison would be against the reading being taken right now and
+        # would always be empty.
         try:
+            previous = baseline_mod.latest()
             found = surface_mod.survey(progress=self.progressed.emit)
         except Exception as exc:  # noqa: BLE001 - a bad reading must not kill the window
             logs.get().error("scan", "The surface survey failed", exc=exc)
             self.failed.emit(str(exc))
             return
-        self.finished.emit(found)
+
+        comparison = None
+        try:
+            if previous is not None:
+                comparison = baseline_mod.compare(previous, found)
+            baseline_mod.save(found)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not cost the reading
+            logs.get().warn("scan", "Could not compare or record the reading",
+                            detail=str(exc)[:200])
+
+        self.finished.emit(found, comparison)
 
 
 class ModelVoice(QObject):
@@ -577,6 +593,18 @@ class ExposurePage(Page):
         controls.add(self.status, 1)
         self.outer.addWidget(controls)
 
+        # Above the counts on purpose. "Nothing is listening that was not
+        # listening yesterday" is the answer people come to this page for; the
+        # absolute numbers are context for it.
+        self.changes_card = Card(mode, accent=True)
+        self.changes_card.add(widgets.heading("Since the last reading", mode))
+        self.changes_note = Text("", "body", theme.INK, mode, wrap=True)
+        self.changes_card.add(self.changes_note)
+        self.changes_body = Column(1)
+        self.changes_card.add(self.changes_body)
+        self.changes_card.setVisible(False)
+        self.outer.addWidget(self.changes_card)
+
         tiles = Card(mode)
         row = Row(9)
         self.t_exposed = Tile("-", "reachable ports", theme.INK, mode)
@@ -594,6 +622,7 @@ class ExposurePage(Page):
         self.outer.addStretch(1)
 
         self.surface: surface_mod.Surface | None = None
+        self.comparison = None
         self._thread: QThread | None = None
         self._worker: SurveyWorker | None = None
 
@@ -641,12 +670,53 @@ class ExposurePage(Page):
         self._stop_thread()
         self.status.setText(f"That did not work: {detail}")
 
-    def _done(self, found: object) -> None:
+    def _done(self, found: object, comparison: object = None) -> None:
         self._stop_thread()
         self.surface = found            # type: ignore[assignment]
+        self.comparison = comparison
         self.refresh()
 
     # -- rendering ------------------------------------------------------
+
+    def _show_changes(self, mode: Mode) -> None:
+        """What moved since the previous reading.
+
+        Hidden when there is no previous reading rather than shown empty: an
+        empty box headed "since the last reading" on a first run reads as
+        "nothing has ever changed", which is a claim rather than the absence
+        of one.
+        """
+        self.changes_body.clear()
+        comparison = self.comparison
+        if comparison is None:
+            self.changes_card.setVisible(False)
+            return
+
+        self.changes_card.setVisible(True)
+        when = (comparison.before_at or "").replace("T", " ")[:19]
+
+        if comparison.quiet and not comparison.skipped:
+            self.changes_note.setText(
+                f"Nothing changed in any view that could be compared, "
+                f"measured against the reading taken at {when}.")
+            return
+
+        self.changes_note.setText(
+            f"Compared against the reading taken at {when}.")
+
+        for section, changes in comparison.by_section().items():
+            self.changes_body.add(Text(section.upper(), "small", theme.BRASS,
+                                       mode, wrap=True))
+            for change in changes:
+                # Appearing is the one that matters most: a port that started
+                # listening, an account that became an administrator.
+                colour = theme.WARNING if change.kind == "appeared" else theme.INK_SOFT
+                self.changes_body.add(Text(f"    {change.describe()}", "small",
+                                           colour, mode, wrap=True))
+
+        for section, why in comparison.skipped.items():
+            self.changes_body.add(Text(f"    {section}: {why}", "small",
+                                       theme.MUTED, mode, wrap=True))
 
     def refresh(self) -> None:
         found = self.surface
@@ -671,6 +741,8 @@ class ExposurePage(Page):
         self.status.setText(
             f"Read in {found.duration_ms / 1000:.1f}s at {when}."
             + ("  This is demonstration data." if found.demo else ""))
+
+        self._show_changes(mode)
 
         self.body.clear()
         ordered = sorted(

@@ -185,43 +185,52 @@ class Console:
         self._write(f"  {headline}", f"bold {GOLD}")
         self.paragraph(detail)
 
-    def finding(self, severity: str, control_id: str, text: str, fixable: str) -> None:
+    def finding(self, severity: str, control_id: str, text: str,
+                fixable: str = "") -> None:
         style = SEVERITY_STYLE.get(severity, "")
-        label = f"  {severity:<9}"
-        rest = f"{control_id:<9} {text}"
+        label = f"  {safe(severity):<9}"
+        rest = f"{safe(control_id):<9} {safe(text)}"
+        # An empty note used to render as a bare "[]" on the end of every line
+        # in scan and demo output - a pair of brackets around nothing, which
+        # reads as a value that failed to load.
+        note = f"  [{safe(fixable)}]" if fixable else ""
         if self._rich:
             line = Text(label, style=style)
             line.append(rest)
-            line.append(f"  [{fixable}]", style=DIM)
+            if note:
+                line.append(note, style=DIM)
             self._rich.print(line)
         else:
-            print(f"{label}{rest}  [{fixable}]")
+            print(f"{label}{rest}{note}")
 
     def outcome(self, status: str, control_id: str, message: str, when: str = "") -> None:
-        word = STATUS_WORD.get(status, status)
+        word = safe(STATUS_WORD.get(status, status))
         style = STATUS_STYLE.get(status, "")
-        stamp = f"{when[:19].replace('T', ' ')}  " if when else ""
+        stamp = f"{safe(when)[:19].replace('T', ' ')}  " if when else ""
+        body = safe(" ".join(message.split())[:200])
+        cid = safe(control_id)
         if self._rich:
             line = Text(f"  {stamp}", style=DIM)
             line.append(f"{word:<10}", style=style)
-            line.append(f"{control_id:<9} ")
-            line.append(" ".join(message.split())[:200], style=DIM)
+            line.append(f"{cid:<9} ")
+            line.append(body, style=DIM)
             self._rich.print(line)
         else:
-            print(f"  {stamp}{word:<10}{control_id:<9} {' '.join(message.split())[:200]}")
+            print(f"  {stamp}{word:<10}{cid:<9} {body}")
 
     def step(self, order: int, control_id: str, title: str, rationale: str,
              risk: str = "") -> None:
-        head = f"  {order:>2}. {control_id}  {title}"
+        cid, name, tier = safe(control_id), safe(title), safe(risk)
+        head = f"  {order:>2}. {cid}  {name}"
         if self._rich:
             line = Text(f"  {order:>2}. ", style=DIM)
-            line.append(control_id, style=f"bold {GOLD}")
-            line.append(f"  {title}")
-            if risk:
-                line.append(f"  ({risk})", style=DIM)
+            line.append(cid, style=f"bold {GOLD}")
+            line.append(f"  {name}")
+            if tier:
+                line.append(f"  ({tier})", style=DIM)
             self._rich.print(line)
         else:
-            print(head + (f"  ({risk})" if risk else ""))
+            print(head + (f"  ({tier})" if tier else ""))
         if rationale:
             self.detail(rationale)
 
@@ -243,6 +252,8 @@ class Console:
             sys.stdout.flush()
 
     def model_row(self, key: str, name: str, state: str, speed: str, marker: str) -> None:
+        key, name = safe(key), safe(name)
+        state, speed, marker = safe(state), safe(speed), safe(marker)
         if self._rich:
             line = Text(f"  {key:<6}", style=f"bold {GOLD}" if marker else "")
             line.append(f"{name:<42}")
@@ -256,14 +267,18 @@ class Console:
             print(f"  {key:<6}{name:<42}{state:<18}{speed}{suffix}")
 
     def control_row(self, cid: str, severity: str, risk: str, how: str, title: str) -> None:
+        cid, risk, how = safe(cid), safe(risk), safe(how)
+        title = safe(title)[:40]
+        style = SEVERITY_STYLE.get(severity, "")
+        severity = safe(severity)
         if self._rich:
             line = Text(f"  {cid:<9}")
-            line.append(f"{severity:<9}", style=SEVERITY_STYLE.get(severity, ""))
+            line.append(f"{severity:<9}", style=style)
             line.append(f"{risk:<10}{how:<14}", style=DIM)
-            line.append(title[:40])
+            line.append(title)
             self._rich.print(line)
         else:
-            print(f"  {cid:<9}{severity:<9}{risk:<10}{how:<14}{title[:40]}")
+            print(f"  {cid:<9}{severity:<9}{risk:<10}{how:<14}{title}")
 
     def control_detail(self, control: Any) -> None:
         self.blank()

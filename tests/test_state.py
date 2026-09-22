@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from lares import config as config_mod
 from lares.autonomy import breaker as breaker_mod
 from lares.autonomy.breaker import Breaker, State
@@ -125,3 +127,77 @@ def test_saving_clamps_before_writing(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "path", lambda: tmp_path / "settings.json")
     config_mod.save(config_mod.Settings(budget=9999))
     assert config_mod.load().budget == 8
+
+
+# --------------------------------------------------------------------------
+# A settings file somebody edited by hand
+# --------------------------------------------------------------------------
+
+BADLY_TYPED = [
+    ({"budget": None}, "budget", 8),
+    ({"budget": "eight"}, "budget", 8),
+    ({"budget": True}, "budget", 8),
+    ({"ceiling": 3}, "ceiling", "caution"),
+    ({"theme": None}, "theme", "auto"),
+    ({"excluded": "NET-003"}, "excluded", []),
+    ({"domains": None}, "domains", []),
+    ({"dry_run": "yes"}, "dry_run", False),
+    ({"interval_minutes": []}, "interval_minutes", 240),
+    ({"breaker_threshold": "two"}, "breaker_threshold", 2),
+]
+
+
+@pytest.mark.parametrize("payload,field,expected", BADLY_TYPED)
+def test_a_hand_edited_settings_file_does_not_crash_the_application(
+        payload, field, expected, tmp_path, monkeypatch):
+    """The defence against a bad settings file used to crash on one.
+
+    validate() clamped values that were out of range and assumed every value
+    had the right type, so `{"budget": null}` - a far likelier edit than
+    `{"budget": 9999}` - raised TypeError comparing None to an int. In the
+    CLI and in the desktop application, at startup, with a traceback instead
+    of the fallback this promises.
+    """
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(config_mod, "path", lambda: path)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    settings = config_mod.load()
+    assert getattr(settings, field) == expected
+
+
+@pytest.mark.parametrize("payload,field,expected", BADLY_TYPED)
+def test_every_correction_is_reported_rather_than_made_silently(
+        payload, field, expected):
+    """Someone who typed it should be told it did not take."""
+    settings = config_mod.Settings(**payload)
+    corrections = settings.validate()
+    assert any(field in c for c in corrections), corrections
+
+
+def test_a_true_is_not_accepted_as_a_number():
+    """bool subclasses int, so a naive isinstance check passes and True
+    silently becomes a budget of 1."""
+    settings = config_mod.Settings(budget=True)
+    settings.validate()
+    assert settings.budget == 8
+
+
+def test_a_good_settings_file_is_left_entirely_alone():
+    settings = config_mod.Settings(ceiling="safe", budget=3, theme="dark",
+                                   excluded=["NET-003"], dry_run=True)
+    assert settings.validate() == []
+    assert (settings.ceiling, settings.budget, settings.theme) == ("safe", 3, "dark")
+
+
+def test_the_desktop_application_starts_on_a_hand_edited_file(tmp_path, monkeypatch, qt_app):
+    """Both front doors read this file at startup, so both must survive it."""
+    pytest.importorskip("PyQt6.QtWidgets")
+    from lares.gui.main_window import Window
+
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(config_mod, "path", lambda: path)
+    path.write_text('{"budget": null, "theme": 7}', encoding="utf-8")
+
+    window = Window(config_mod.load(), autostart=False)
+    assert window.settings.budget == 8
