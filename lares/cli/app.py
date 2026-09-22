@@ -527,7 +527,8 @@ def cmd_undo(args: argparse.Namespace, console: Console) -> int:
     for entry in targets:
         console.event(f"{entry.outcome.control_id}: undoing", entry.control_title)
         outcome = executor.undo_recorded(entry.outcome.rollback_script,
-                                         entry.outcome.control_id)
+                                         entry.outcome.control_id,
+                                         entry.outcome.params)
         console.outcome(outcome.status.value, outcome.control_id, outcome.message)
         journal.record(outcome, control_title=entry.control_title,
                        rationale=f"undo of {entry.outcome.action_id}")

@@ -197,6 +197,26 @@ def _no_window_flags() -> int:
     return 0
 
 
+def _system_root() -> str:
+    """The real Windows directory, asked of the OS rather than the environment.
+
+    Falls back to the environment variable only when the call is unavailable,
+    which is every non-Windows platform and nothing else.
+    """
+    if IS_WINDOWS:
+        try:
+            buffer = ctypes.create_unicode_buffer(260)
+            length = ctypes.windll.kernel32.GetSystemDirectoryW(  # type: ignore[attr-defined]
+                buffer, len(buffer))
+            if 0 < length < len(buffer):
+                # GetSystemDirectory returns ...\System32; the callers here
+                # want the Windows directory above it.
+                return str(Path(buffer.value).parent)
+        except Exception:  # noqa: BLE001 - fall through to the environment
+            pass
+    return os.environ.get("SystemRoot", r"C:\Windows")
+
+
 def powershell_exe() -> str:
     """Prefer Windows PowerShell 5.1; fall back to pwsh 7+ if that is all there is.
 
@@ -215,7 +235,13 @@ def powershell_exe() -> str:
     SYSTEM shell.
     """
     if IS_WINDOWS:
-        root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        # GetSystemDirectoryW, not %SystemRoot%. The environment variable is
+        # inherited and any process can set it for the one it launches, so
+        # building "absolute, administrator-only" paths out of it left the
+        # whole set attacker-chosen - a bypass of the fix that replaced the
+        # PATH search. The Win32 call reads the value the kernel holds and
+        # cannot be influenced by the environment.
+        root = Path(_system_root())
         candidates = [
             root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
             # A 32-bit process on 64-bit Windows is redirected away from the

@@ -95,7 +95,10 @@ class Worker(QObject):
 
     def run_forever(self) -> None:
         try:
-            self.agent.run_forever()
+            # The cycle_done signal used to be emitted only by run_once, which
+            # nothing connected, so the window never learned a pass had
+            # finished. Emitting from here is what makes the pages refresh.
+            self.agent.run_forever(on_cycle=self.cycle_done.emit)
         finally:
             self.stopped.emit()
 
@@ -909,7 +912,8 @@ class LedgerPage(Page):
         executor = Executor(window.catalog,
                             Context(elevated=is_elevated(), autonomous=False))
         outcome = executor.undo_recorded(entry.outcome.rollback_script,
-                                         entry.outcome.control_id)
+                                         entry.outcome.control_id,
+                                         entry.outcome.params)
         window.journal.record(outcome, control_title=entry.control_title,
                               rationale=f"undo of {entry.outcome.action_id}")
         self.refresh()

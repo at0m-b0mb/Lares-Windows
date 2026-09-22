@@ -196,10 +196,62 @@ class Rule:
     #: which is otherwise trusted as the inverse of a vetted remediation, is
     #: refused if it contains them.
     absolute: bool = False
+    #: Set when the rule asks what is *absent* rather than what is present.
+    #:
+    #: Those are read only against the normalised text, and the difference is
+    #: not a nicety. "New-NetFirewallRule that does not say -Action Block" is a
+    #: negative lookahead bounded by [^\n]*, so on raw source it cannot see an
+    #: -Action Block that sits after a line continuation - and NET-003, a real
+    #: control that blocks a port, formats exactly that way. Screening both
+    #: forms adds matches for a positive rule and false positives for this
+    #: kind, so this kind reads one form only.
+    normalised_only: bool = False
 
 
 def _rx(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE)
+
+
+#: A PowerShell parameter, matching both the space form and the colon form.
+#: ``-Enabled False`` and ``-Enabled:$false`` are the same instruction, and an
+#: audit found that every rule here only knew the first one.
+def _flag(name: str, value: str) -> str:
+    return rf"-{name}\s*[:\s]\s*\$?(?:{value})\b"
+
+
+#: Line continuation: a backtick, optional trailing spaces, then a newline.
+#: PowerShell joins these into one logical line, so a rule written with
+#: ``[^\n]*`` - which is nearly all of them - stops matching the moment an
+#: attacker breaks the statement across two lines.
+_CONTINUATION = re.compile(r"`[ \t]*\r?\n[ \t]*")
+
+
+def normalise(script: str) -> str:
+    """Undo the cheap obfuscations, so the rules below see one shape.
+
+    Screening raw text means every rule has to anticipate every spelling of
+    the thing it forbids, and it will not. An audit walked through this list
+    and defeated eight of the rules without writing anything clever: a
+    backtick before a newline, a backtick in the middle of an identifier
+    (``I`EX`` runs), a parenthesis where a space was expected, ``net.exe``
+    instead of ``net``.
+
+    Undoing those here means each rule describes an *operation* rather than a
+    spelling. It does not make this a PowerShell parser and it does not close
+    the class - obfuscated PowerShell is undecidable in the general case, and
+    anyone who wants past a blocklist gets past a blocklist. It closes the
+    cheap half, which is the half a hallucinating model and a casual attacker
+    both live in.
+
+    The normalised text is screened *in addition to* the original, never
+    instead of it, so this can only ever add matches.
+    """
+    joined = _CONTINUATION.sub(" ", script)
+    # A backtick inside a word is an escape PowerShell discards, so "I`EX" is
+    # "IEX". Removing them all can merge tokens that were separated by `n or
+    # `t, which only ever creates more matches, never fewer.
+    plain = joined.replace("`", "")
+    return re.sub(r"[ \t]+", " ", plain)
 
 
 #: Operations Lares will not perform, in the catalogue or in the Expert lane.
@@ -215,7 +267,10 @@ DANGEROUS_RULES: tuple[Rule, ...] = (
          "erases a whole disk", absolute=True),
     Rule("remove-partition", _rx(r"\bRemove-Partition\b"),
          "deletes a disk partition", absolute=True),
-    Rule("delete-shadows", _rx(r"\bvssadmin\b[^\n]*\bdelete\b|\bWin32_ShadowCopy\b[^\n]*\bDelete\b"),
+    Rule("delete-shadows",
+         _rx(r"\bvssadmin(\.exe)?\b[^\n]*\bdelete\b|"
+             r"\bwmic(\.exe)?\b[^\n]*\bshadowcopy\b[^\n]*\bdelete\b|"
+             r"\bWin32_ShadowCopy\b[^\n]*\bDelete\b"),
          "deletes volume shadow copies, which is how ransomware removes your ability to recover",
          absolute=True),
     Rule("wipe-free-space", _rx(r"\bcipher(\.exe)?\b[^\n]*\s/w"),
@@ -228,61 +283,76 @@ DANGEROUS_RULES: tuple[Rule, ...] = (
          "force-deletes a directory tree", absolute=True),
     Rule("format-command", _rx(r"\bformat(\.com|\.exe)?\s+[a-z]:"),
          "formats a drive", absolute=True),
-    Rule("rd-deltree", _rx(r"\b(rd|rmdir)\b[^\n]*\s/s\b"),
+    Rule("rd-deltree", _rx(r"\b(rd|rmdir)(\.exe)?\b[^\n]*\s/s\b"),
          "recursively removes a directory tree", absolute=True),
 
     Rule("disable-adapter", _rx(r"\bDisable-NetAdapter\b"),
          "switches off a network adapter, which can cut off all remote access"),
-    Rule("disable-defender", _rx(r"-DisableRealtimeMonitoring\s+\$?true|\bUninstall-WindowsFeature\b[^\n]*Defender"),
+    Rule("disable-defender",
+         # Every -Disable* switch on Set-MpPreference, in both the space and
+         # the colon form, plus turning reporting off entirely. An audit got
+         # past the old rule with "-DisableRealtimeMonitoring:$true" and with
+         # the sibling switches it never named.
+         _rx(r"\bSet-MpPreference\b[^\n]*" + _flag(r"Disable[A-Za-z]*", r"true|1") +
+             r"|\bSet-MpPreference\b[^\n]*" + _flag("MAPSReporting", "0|Disabled") +
+             r"|\bUninstall-WindowsFeature\b[^\n]*Defender"),
          "turns off antivirus protection"),
-    Rule("remove-user", _rx(r"\bRemove-LocalUser\b|\bnet\s+user\b[^\n]*\s/delete\b"),
+    Rule("remove-user",
+         _rx(r"\bRemove-LocalUser\b|\bnet(\.exe)?\s+user\b[^\n]*\s/delete\b|"
+             r"\bDeleteUser\b|\[ADSI\][^\n]*\bDelete\b[^\n]*\buser\b"),
          "deletes a local user account"),
     Rule("remove-admin", _rx(r"\bRemove-LocalGroupMember\b[^\n]*Administrators"),
          "removes an administrator, which can leave nobody able to manage the machine"),
-    Rule("reboot", _rx(r"\bRestart-Computer\b|\bStop-Computer\b|\bshutdown(\.exe)?\s+/[rs]\b"),
+    Rule("reboot", _rx(r"\bRestart-Computer\b|\bStop-Computer\b|"
+                       r"\bshutdown(\.exe)?\s+/[rs]\b"),
          "restarts or shuts down the machine without warning"),
     Rule("download-and-run",
-         _rx(r"(Invoke-WebRequest|Invoke-RestMethod|iwr|irm|curl|wget|DownloadString|DownloadFile)"
+         _rx(r"(Invoke-WebRequest|Invoke-RestMethod|iwr|irm|curl|wget|"
+             r"DownloadString|DownloadFile|DownloadData)"
              r"[^\n]*\|\s*(iex|Invoke-Expression)"),
          "downloads code from the network and executes it"),
-    Rule("invoke-expression", _rx(r"\bInvoke-Expression\b|\biex\b\s"),
+    Rule("invoke-expression",
+         # The trailing \s used to be required, so the canonical download
+         # cradle - iex(New-Object Net.WebClient).DownloadString(...) - walked
+         # straight through with a parenthesis where a space was expected.
+         _rx(r"\b(iex|Invoke-Expression)\b"),
          "builds and runs a command from a string, which defeats every check above"),
-    Rule("encoded-command", _rx(r"-e(nc|ncoded(command)?)?\s+[A-Za-z0-9+/]{40,}"),
+    Rule("encoded-command",
+         _rx(r"-e(nc|ncoded(command)?)?\s*[:\s]\s*[A-Za-z0-9+/]{40,}"),
          "runs a base64-encoded command, hiding what it does"),
     Rule("registry-hive-delete",
          _rx(r"\bRemove-Item\b[^\n]*HK(LM|CU|CR|U|CC):\\?\s*$|"
              r"\bReg(\.exe)?\s+delete\b[^\n]*\\(SYSTEM|SOFTWARE|SAM|SECURITY)\s*$"),
          "deletes a top-level registry hive"),
     Rule("disable-firewall-all",
-         _rx(r"Set-NetFirewallProfile[^\n]*-All\b[^\n]*-Enabled\s+False|"
-             r"netsh\s+advfirewall\s+set\s+allprofiles\s+state\s+off"),
-         "switches the firewall off entirely"),
+         _rx(r"\bSet-NetFirewallProfile\b[^\n]*" + _flag("Enabled", r"false|0") +
+             r"|netsh\s+advfirewall\s+set\s+(all|domain|private|public)profiles?\s+state\s+off"),
+         "switches the firewall off"),
     Rule("scheduled-persistence",
          _rx(r"\bRegister-ScheduledTask\b|\bschtasks(\.exe)?\s+/create\b"),
          "creates a scheduled task, which is a persistence mechanism Lares does not need"),
 
     # -- things a tool that hardens a machine never does ----------------
     #
-    # Everything below this line is refused on the same principle as the rest
-    # of the list, applied to the other direction: these are not catastrophes,
-    # they are the specific moves an attacker makes, and a program whose whole
-    # job is to reduce a machine's attack surface has no legitimate reason to
-    # perform any of them.
+    # Not catastrophes. These are the specific moves an attacker makes, and a
+    # program whose job is to shrink a machine's attack surface has no
+    # legitimate reason to perform any of them.
     #
-    # They matter most in the freehand lane. The reading handed to the model
-    # contains service display names, installed product names and file paths,
-    # and those are strings an attacker can choose - malware picks its own
-    # DisplayName. Telling the model to treat that reading as data is
-    # necessary and is done, but it is an instruction to a 1.5B model, and an
-    # instruction is not a control. These rules hold whether the model was
-    # persuaded or not.
+    # They matter most in the freehand lane, where the model writes the script.
+    # The reading it is shown contains service display names and product names,
+    # and those are strings an attacker can choose - malware names itself.
+    # Telling the model to treat that reading as data is necessary and is done,
+    # but an instruction to a 1.5B model is not a control. These hold whether
+    # it was persuaded or not.
     Rule("create-user",
-         _rx(r"\bNew-LocalUser\b|\bnet\s+user\b[^\n]*\s/add\b"),
+         _rx(r"\bNew-LocalUser\b|\bnet(\.exe)?\s+user\b[^\n]*\s/add\b|"
+             r"\[ADSI\][^\n]*\bCreate\b[^\n]*\buser\b"),
          "creates a local account, which hardening never requires",
          absolute=True),
     Rule("grant-admin",
          _rx(r"\bAdd-LocalGroupMember\b[^\n]*Administrators|"
-             r"\bnet\s+localgroup\b[^\n]*Administrators[^\n]*\s/add\b"),
+             r"\bnet(\.exe)?\s+localgroup\b[^\n]*Administrators[^\n]*\s/add\b|"
+             r"\[ADSI\][^\n]*Administrators[^\n]*\bAdd\b"),
          "grants administrator rights to an account",
          absolute=True),
     Rule("antivirus-exclusion",
@@ -292,20 +362,24 @@ DANGEROUS_RULES: tuple[Rule, ...] = (
          absolute=True),
     Rule("clear-event-log",
          _rx(r"\bwevtutil(\.exe)?\s+(cl|clear-log)\b|\bClear-EventLog\b|"
-             r"\bRemove-EventLog\b"),
+             r"\bRemove-EventLog\b|\bwmic(\.exe)?\b[^\n]*\bnteventlog\b[^\n]*\bcleareventlog\b"),
          "erases an event log, destroying the record of what happened",
          absolute=True),
     Rule("remote-shell",
-         _rx(r"System\.Net\.Sockets\.(TCPClient|TcpListener)|"
+         # System. is optional in PowerShell type literals, and leaving it off
+         # was enough to defeat this entirely.
+         _rx(r"(System\.)?Net\.Sockets\.(TCPClient|TcpListener)|"
              r"\bNew-PSSession\b|\bEnter-PSSession\b"),
          "opens a network session from the machine it is meant to be securing"),
     Rule("open-inbound",
-         # Not absolute: undoing a rule Lares added to *close* something can
-         # legitimately mean allowing it again.
-         _rx(r"\bNew-NetFirewallRule\b(?=[^\n]*-Direction\s+Inbound)"
-             r"(?=[^\n]*-Action\s+Allow)|"
-             r"netsh\s+advfirewall\s+firewall\s+add\s+rule[^\n]*action=allow"),
-         "opens an inbound hole in the firewall"),
+         # New-NetFirewallRule defaults to Inbound and Allow, so naming neither
+         # was how the old rule was beaten. Inverted: any new rule is refused
+         # unless it explicitly blocks. Not absolute - undoing a rule Lares
+         # added to close something legitimately means allowing it again.
+         _rx(r"\bNew-NetFirewallRule\b(?![^\n]*" + _flag("Action", "Block|Deny") + r")|"
+             r"netsh\s+advfirewall\s+firewall\s+add\s+rule[^\n]*action\s*=\s*allow"),
+         "opens an inbound hole in the firewall",
+         normalised_only=True),
 )
 
 
@@ -334,9 +408,17 @@ def screen_script(script: str, *, absolute_only: bool = False) -> ScreenResult:
     """
     if not script or not script.strip():
         return ScreenResult(True)
+
+    # Both the script as written and the script with the cheap obfuscations
+    # undone. Screening the normalised form *as well as* the original can only
+    # add matches - a rule that fires on either refuses - so this cannot make
+    # the screen more permissive than it was.
+    joined = normalise(script)
     hits = tuple(
         rule for rule in DANGEROUS_RULES
-        if (rule.absolute or not absolute_only) and rule.pattern.search(script)
+        if (rule.absolute or not absolute_only)
+        and any(rule.pattern.search(form) for form in
+                ((joined,) if rule.normalised_only else (script, joined)))
     )
     return ScreenResult(not hits, hits)
 

@@ -308,10 +308,27 @@ class Agent:
 
     # -- scheduling -----------------------------------------------------
 
-    def run_forever(self) -> None:
-        """Cycle on the configured interval until :meth:`stop` is called."""
+    def run_forever(self, on_cycle: Callable[[Cycle], None] | None = None) -> None:
+        """Cycle on the configured interval until :meth:`stop` is called.
+
+        *on_cycle* is handed each finished cycle. The desktop application needs
+        it because it runs this method, not run_cycle, and without it nothing
+        ever told the window a pass had finished - the Hearth, the Findings and
+        the Ledger showed whatever they had at startup for as long as the
+        application stayed open, which on a tool meant to be left running is
+        most of its life.
+        """
+        def done(cycle: Cycle) -> None:
+            if on_cycle is None:
+                return
+            try:
+                on_cycle(cycle)
+            except Exception as exc:  # noqa: BLE001 - a listener must not stop the agent
+                logs.get().warn("cycle", "A cycle listener raised",
+                                detail=str(exc)[:200])
+
         if self.settings.scan_on_start:
-            self.run_cycle()
+            done(self.run_cycle())
             self._release_model()
 
         interval = max(300, self.settings.interval_minutes * 60)
@@ -325,7 +342,7 @@ class Agent:
                 waited += 5.0
             if self._stop.is_set():
                 break
-            self.run_cycle()
+            done(self.run_cycle())
             self._release_model()
 
     def _release_model(self) -> None:

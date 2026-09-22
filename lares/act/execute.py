@@ -29,11 +29,17 @@ from typing import Any, Callable
 
 from ..catalog.loader import Catalog, render
 from ..core import Control, Outcome, PlannedAction, Status
-from .. import demo_data
+from .. import demo_data, logs
 from ..winsys import powershell, is_demo
 from . import health as health_mod
 from . import snapshot as snapshot_mod
-from .guard import Context, Refused, clear_to_run, screen_script
+from .guard import (
+    Context,
+    Refused,
+    clear_to_run,
+    screen_script,
+    validate_params,
+)
 
 #: Remediation scripts get longer than probes, especially DISM ones.
 REMEDIATE_TIMEOUT = 300
@@ -371,20 +377,75 @@ class Executor:
 
     # -- manual undo of a past change -------------------------------------
 
-    def undo_recorded(self, rollback_script: str, control_id: str = "") -> Outcome:
-        """Run a rollback script kept in the journal, for an older change."""
+    def undo_recorded(self, rollback_script: str, control_id: str = "",
+                      params: dict[str, Any] | None = None) -> Outcome:
+        """Run a rollback for an older change.
+
+        The stored script is a record, not an input, wherever it can be
+        avoided. The journal lives in the user's own profile, so a process
+        running as that user at medium integrity can rewrite it - and the
+        person who then runs ``lares undo`` is running as administrator. That
+        turns a file anybody could edit into elevated PowerShell, which is the
+        only privilege escalation this program could plausibly offer anyone.
+
+        So when the control is still in the catalogue, the rollback is
+        re-rendered from the catalogue and the stored parameters, through the
+        same validation any other action goes through, and *that* is what runs.
+        A difference between what was rendered and what the journal holds is
+        reported rather than swallowed: it means the catalogue changed under
+        the entry, or somebody edited the file.
+
+        Only when the control has gone from the catalogue is the stored text
+        used, and then it is screened in full rather than with the rollback
+        exemption. That exemption is earned by provenance - a vetted
+        remediation's exact inverse - and a line read back off disk has none.
+        """
         started = time.monotonic()
         outcome = Outcome(control_id=control_id, status=Status.FAILED,
+                          params=dict(params or {}),
                           rollback_script=rollback_script)
-        screened = screen_script(rollback_script, absolute_only=True)
+
+        script, absolute_only = rollback_script, False
+        control = self.catalog.get(control_id) if control_id else None
+        if control is not None and control.rollback:
+            try:
+                clean = validate_params(control, params or {})
+                script = render(control.rollback, clean)
+            except Refused as refusal:
+                outcome.status = Status.REFUSED
+                outcome.refusal_reason = (
+                    f"the stored parameters are not valid for {control_id}: "
+                    f"{refusal.reason}")
+                outcome.message = outcome.refusal_reason
+                return outcome
+            # Re-rendered from a reviewed catalogue, so it has the provenance
+            # the exemption exists for.
+            absolute_only = True
+            outcome.rollback_script = script
+            if _squash(script) != _squash(rollback_script):
+                logs.get().warn(
+                    "act", "The stored rollback differs from the catalogue's",
+                    control=control_id,
+                    detail="re-rendered from the catalogue and running that")
+                self._say(control_id, "undo",
+                          "the journal's copy differs from the catalogue - "
+                          "running the catalogue's")
+
+        screened = screen_script(script, absolute_only=absolute_only)
         if not screened.ok:
             outcome.status = Status.REFUSED
             outcome.refusal_reason = "the stored rollback contains a forbidden operation"
             outcome.message = screened.summary
             return outcome
-        ok, output = self._run(rollback_script, ROLLBACK_TIMEOUT)
+        ok, output = self._run(script, ROLLBACK_TIMEOUT)
         outcome.output = output
         outcome.status = Status.VERIFIED if ok else Status.FAILED
+        # An undo that failed leaves the change exactly where it was, and the
+        # undo list is the one place someone would go to try again. Recording
+        # it as not-in-place is how a change that is still on the machine
+        # disappears from the only view that would let anyone remove it.
+        outcome.change_in_place = not ok
+        outcome.rollback_script = script if not ok else ""
         outcome.message = "change undone" if ok else f"undo failed: {output[:300]}"
         outcome.duration_ms = _ms(started)
         return outcome
@@ -392,3 +453,8 @@ class Executor:
 
 def _ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def _squash(script: str) -> str:
+    """Whitespace-insensitive form, for comparing two renderings."""
+    return " ".join(script.split())
