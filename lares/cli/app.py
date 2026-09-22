@@ -669,6 +669,16 @@ def cmd_config(args: argparse.Namespace, console: Console) -> int:
                 return 1
         for correction in settings.validate():
             console.warn(correction)
+
+        # An exclusion that matches no control is almost always a typo, and a
+        # typo here reads as "this control is protected from Lares" while
+        # protecting nothing.
+        known = {c.id for c in loader.load()}
+        unknown = [c for c in settings.excluded if c not in known]
+        if unknown:
+            console.warn(f"not in the catalogue, so these exclude nothing: "
+                         f"{', '.join(unknown)}")
+
         config_mod.save(settings)
         console.ok(f"Saved to {config_mod.path()}")
         console.blank()
@@ -786,7 +796,10 @@ def cmd_consult(args: argparse.Namespace, console: Console) -> int:
         console.section("Applying what it decided")
         agent, _ = build(settings, catalog, listener=_make_listener(console),
                          with_model=True)
-        cycle = agent.run_cycle()
+        # The consultation's own plan, not a fresh one. Running run_cycle()
+        # here threw away everything the model had just spent minutes deciding
+        # and applied the ordinary planner's answer under this heading.
+        cycle = agent.apply_plan(result.plan, result.scan)
         _show_cycle(console, cycle, catalog)
     elif result.plan.actions:
         console.blank()

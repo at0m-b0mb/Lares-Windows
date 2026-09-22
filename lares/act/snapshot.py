@@ -14,6 +14,14 @@ paths it mentions are exported with reg.exe, and if it touches firewall or
 service configuration those are dumped too. A System Restore point is attempted
 once per cycle as a coarse backstop, but it is best-effort - restore points are
 disabled on a large fraction of real machines and rate-limited on the rest.
+
+Two things this module does **not** do, said here because the paragraph above
+used to imply both. Nothing restores a snapshot automatically: the .reg files
+are evidence and a manual recovery path, and the rollback script is what runs.
+And a snapshot that captured some of what it went looking for is still a
+partial snapshot - ``Snapshot.complete`` is the field that says which, and the
+executor records it rather than treating "we got one key out of three" as a
+success.
 """
 
 from __future__ import annotations
@@ -62,6 +70,18 @@ class Snapshot:
     def ok(self) -> bool:
         """True when something usable was captured, or there was nothing to capture."""
         return bool(self.captured) or not self.failures
+
+    @property
+    def complete(self) -> bool:
+        """True when everything it went looking for was captured.
+
+        Distinct from ``ok`` on purpose. A snapshot that got one registry key
+        out of three is usable - better than nothing, and the change should
+        still go ahead - but it is not the record the operator would assume
+        from a line that says the state was captured. Proceeding is right;
+        saying so as though it were complete is not.
+        """
+        return not self.failures
 
     def summary(self) -> str:
         if not self.captured and not self.failures:
@@ -177,6 +197,26 @@ def _capture(snap: Snapshot, label: str, script: str, filename: str) -> None:
         snap.failures.append(label)
 
 
+def protection_enabled() -> bool:
+    """Whether System Protection is on for the system drive.
+
+    Asked first because it is off by default on most consumer installs, and
+    Checkpoint-Computer on a machine where it is off spends its whole timeout
+    finding that out. One cheap question saves up to three minutes per cycle
+    in what is, on this hardware, the common case.
+    """
+    if is_demo() or not IS_WINDOWS:
+        return False
+    result = powershell(
+        "(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | "
+        "Measure-Object).Count -ge 0 -and "
+        "((Get-CimInstance -Namespace root/default -ClassName SystemRestore "
+        "-ErrorAction Stop | Measure-Object).Count -ge 0)",
+        timeout=30,
+    )
+    return result.ok
+
+
 def restore_point(description: str = "Lares hardening") -> bool:
     """Attempt a System Restore point. Best effort; never blocks a cycle.
 
@@ -186,6 +226,8 @@ def restore_point(description: str = "Lares hardening") -> bool:
     rollback actually relies on.
     """
     if is_demo() or not IS_WINDOWS:
+        return False
+    if not protection_enabled():
         return False
     result = powershell(
         "Checkpoint-Computer -Description '" + description.replace("'", "") + "' "

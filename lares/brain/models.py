@@ -21,9 +21,21 @@ Checksums
 ---------
 No hash is shipped for a file this repository does not host. On first download
 Lares records the hash it received, prints it so it can be compared against the
-model card, and pins it locally. Every later load verifies against that pin, so
-a file swapped afterwards is caught even though the first fetch is trust-on-
-first-use. Set ``sha256`` in a registry entry to make the first fetch strict too.
+model card, and pins it locally.
+
+Be precise about what that buys, because an earlier version of this paragraph
+was not. A **downloaded** model is hashed when it is fetched and again by
+``lares model``, against a pin recorded on first use. A model **carried inside
+the executable** is hashed when it is unpacked, against the SHA-256 in the
+footer, which is written at build time and is authoritative. Neither is
+re-hashed on every start: that is a gigabyte of reading before the first token
+on the hardware this targets, and it is why ``is_unpacked`` compares size.
+
+And the honest limit underneath all of it: the cache lives in the user's own
+profile, so anything that can rewrite the weights can rewrite lares.exe beside
+them. These checks catch corruption, a half-finished download and a careless
+swap. They are not a defence against the account they run as, and nothing
+short of code signing would be.
 """
 
 from __future__ import annotations
@@ -32,7 +44,7 @@ import json
 import os
 import platform
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..winsys import IS_WINDOWS, data_dir, powershell, write_json_atomic
@@ -255,10 +267,17 @@ def _embedded_spec() -> ModelSpec | None:
         return None
 
     # Prefer the ladder entry with the same filename, so the embedded model
-    # inherits its real context length and thread advice rather than a guess.
+    # inherits its real context length and thread advice rather than a guess -
+    # but carry the footer's hash across rather than the ladder's empty one.
+    #
+    # The ladder ships no sha256, because this repository does not host the
+    # weights. The footer does, written when the model was appended. Returning
+    # the ladder entry unchanged threw that away and fell back to the
+    # trust-on-first-use pin file, and it did so for exactly the builds CI
+    # publishes - the ones where an authoritative hash existed.
     for spec in LADDER:
         if spec.filename == payload.name:
-            return spec
+            return replace(spec, sha256=payload.sha256)
 
     return ModelSpec(
         key="embedded",

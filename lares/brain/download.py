@@ -7,11 +7,18 @@ install can still get one.
 
 On integrity: the first fetch is trust-on-first-use, because no hash is shipped
 for a file this project does not host and inventing one would be worse than
-admitting that. What Lares does instead is compute the hash it received, print it
-so it can be checked against the model card, and pin it. Every load afterwards
-verifies against that pin, so a file replaced later - the realistic attack on a
-long-lived install - is caught. Filling in ``sha256`` on a registry entry makes
-even the first fetch strict.
+admitting that. What Lares does instead is compute the hash it received, print
+it so it can be checked against the model card, and pin it. ``verify`` then
+checks the file against that pin whenever it is called - on every fetch, and
+whenever ``lares model`` is run.
+
+It is not checked on every start. Re-reading a gigabyte before the first token
+is not a cost the hardware this targets can pay, so a model already in place is
+taken on its size. What this catches is a truncated download, a disk that
+rotted, and a file replaced by something of a different length. What it cannot
+catch is the account it runs as: the cache is in that user's own profile,
+beside an executable the same user can replace. Filling in ``sha256`` on a
+registry entry makes even the first fetch strict.
 """
 
 from __future__ import annotations

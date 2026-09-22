@@ -102,13 +102,54 @@ class Report:
                 f"All {len(self.checked)} changes Lares made are still in place.")
 
 
+def _left_a_change(entry: Entry) -> bool:
+    """Whether this attempt left something on the machine.
+
+    ``change_in_place`` is the field that actually answers it. Status does
+    not: a successful ``lares undo`` is journalled as VERIFIED with the
+    control's own id, so reading status alone counted every deliberate undo as
+    an application - and then re-probed it, found the control non-compliant
+    exactly as intended, and reported it to the operator as a change that had
+    come undone. Entries written before the field existed are judged the old
+    way rather than being silently dropped.
+    """
+    if entry.has_change_flag:
+        return entry.outcome.change_in_place
+    return entry.outcome.status in APPLIED
+
+
 def applied_controls(journal: Journal, limit: int = 2000) -> dict[str, list[Entry]]:
-    """Every control the journal shows being applied, newest entry first."""
+    """Every control the journal shows Lares having left changed.
+
+    Newest first, and a control whose most recent entry undid the change is
+    left out entirely: it is not drift when somebody asked for it.
+    """
     out: dict[str, list[Entry]] = {}
+    #: control id -> is a change currently in place. Decided by the NEWEST
+    #: entry for that control and never revisited: entries arrive newest
+    #: first, so an older undo must not erase a newer re-application.
+    standing: dict[str, bool] = {}
+
     for entry in journal.recent(limit=limit):
-        if entry.outcome.status not in APPLIED:
+        control_id = entry.outcome.control_id
+
+        if control_id not in standing:
+            if _left_a_change(entry):
+                standing[control_id] = True
+                out[control_id] = [entry]
+            elif entry.outcome.status is Status.VERIFIED:
+                # A verified attempt that left nothing in place is an undo
+                # that worked. The control is not applied right now.
+                standing[control_id] = False
+            # Refused, skipped, simulated and failed attempts decide nothing;
+            # the next older entry gets to answer instead.
             continue
-        out.setdefault(entry.outcome.control_id, []).append(entry)
+
+        # Older entries only add to the count of how many times this control
+        # has had to be applied, which is the signal that it does not hold.
+        if standing[control_id] and _left_a_change(entry):
+            out[control_id].append(entry)
+
     return out
 
 

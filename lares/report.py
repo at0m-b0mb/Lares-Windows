@@ -13,6 +13,7 @@ needed to understand what was wrong with it.
 from __future__ import annotations
 
 import html
+from dataclasses import replace
 from pathlib import Path
 
 from .core import Cycle, Scan, Severity, Status, dumps
@@ -45,7 +46,14 @@ def write_report(scan: Scan, cycle: Cycle | None, path: str,
     suffix = target.suffix.lower()
 
     if suffix == ".json":
-        payload = {"scan": scan, "cycle": cycle} if cycle else {"scan": scan}
+        # Redacted like every other format. This branch used to ignore the
+        # flag completely, so the one format most likely to be attached to a
+        # ticket or posted in a thread was the one that carried the hostname
+        # and the account names out unredacted - while the top of this file
+        # said facts are redacted by default.
+        payload = {"scan": _redacted(scan) if redact else scan}
+        if cycle:
+            payload["cycle"] = cycle
         target.write_text(dumps(payload), encoding="utf-8")
     elif suffix in (".txt", ".text", ".md"):
         target.write_text(as_text(scan, cycle, redact), encoding="utf-8")
@@ -54,6 +62,18 @@ def write_report(scan: Scan, cycle: Cycle | None, path: str,
             target = target.with_suffix(".html")
         target.write_text(as_html(scan, cycle, redact), encoding="utf-8")
     return target
+
+
+def _redacted(scan: Scan) -> Scan:
+    """The same scan with its sensitive facts masked.
+
+    A copy, because the caller's scan is used again afterwards - by the
+    console, by the desktop pages - and quietly blanking its facts in place
+    because someone asked for a report would be a surprising thing for a
+    write function to do.
+    """
+    return replace(scan, facts=[f.redacted() if f.sensitive else f
+                                for f in scan.facts])
 
 
 # --------------------------------------------------------------------------

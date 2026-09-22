@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..core import Cycle, Status, utcnow
+from .. import logs
 from ..winsys import data_dir, read_json, write_json_atomic
 
 
@@ -58,16 +59,21 @@ def load() -> State:
         return State()
 
 
-def save(state: State) -> None:
-    """Persist the breaker atomically.
+def save(state: State) -> bool:
+    """Persist the breaker atomically. Returns whether it stuck.
 
     This one matters more than the other state files. Every loader here treats
     an unparseable file as "use the defaults", and the default for `tripped` is
     False - so a breaker.json torn by a power cut would silently re-arm
     autonomy on the machine that had just halted itself. An atomic replace
     means a reader sees the old state or the new one, never a fragment.
+
+    The return value used to be discarded, which made a disk that refused the
+    write into a breaker that came back armed: this process believed it had
+    halted, and the next one read a file that said otherwise. A breaker is
+    only worth having if it fails closed.
     """
-    write_json_atomic(_path(), asdict(state))
+    return write_json_atomic(_path(), asdict(state))
 
 
 class Breaker:
@@ -146,10 +152,34 @@ class Breaker:
         save(self.state)
 
     def trip(self, reason: str) -> None:
-        """Halt autonomy immediately, for a reason outside the cycle count."""
+        """Halt autonomy immediately, for a reason outside the cycle count.
+
+        A trip is monotonic. The file is re-read first and a trip already
+        recorded by another process is kept, because writing this whole object
+        over the top of it is last-writer-wins - and the loser of that race,
+        on a machine where two copies of Lares are running, is a machine that
+        halted itself and then carried on.
+        """
         self.state.tripped = True
         self.state.tripped_at = utcnow()
         self.state.reason = reason
         self.state.history.append(f"{utcnow()} halted: {reason}")
         self.state.history = self.state.history[-20:]
-        save(self.state)
+
+        on_disk = load()
+        if on_disk.tripped and on_disk.tripped_at:
+            # Keep whichever trip came first, and both explanations.
+            self.state.tripped_at = min(self.state.tripped_at, on_disk.tripped_at)
+            if on_disk.reason and on_disk.reason != reason:
+                self.state.reason = f"{on_disk.reason}; {reason}"
+        self.state.consecutive_bad = max(self.state.consecutive_bad,
+                                         on_disk.consecutive_bad)
+
+        if not save(self.state):
+            # In memory this process is halted, and it will stay halted. The
+            # next process will not know, so say so where someone will see it
+            # rather than leaving a silent fail-open.
+            logs.get().error(
+                "system", "The circuit breaker tripped but could not be written",
+                exc=OSError(f"could not write {_path()}"),
+                reason=reason)

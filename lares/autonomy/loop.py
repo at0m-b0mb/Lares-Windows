@@ -216,6 +216,48 @@ class Agent:
                  rolled_back=len(cycle.reverted), halted=cycle.halted)
         return cycle
 
+    def apply_plan(self, plan: Plan, scan: Scan) -> Cycle:
+        """Carry out a plan that was decided elsewhere.
+
+        The consultation lane needs this. It spends several minutes letting the
+        model choose what to look at and then what to do, prints that, and used
+        to hand --apply a fresh run_cycle() - which threw the consultation away
+        and applied whatever the ordinary planner decided instead, under a
+        heading that said "Applying what it decided". A different decision,
+        presented as that one.
+
+        Everything after the decision is the same code the cycle uses: the same
+        executor, the same journal, the same breaker, the same exclusions.
+        """
+        cycle_id = new_id("cyc")
+        cycle = Cycle(scan=scan, plan=plan, cycle_id=cycle_id)
+        log = logs.get()
+
+        if self.settings.excluded:
+            excluded = set(self.settings.excluded)
+            for action in list(plan.actions):
+                if action.control_id in excluded:
+                    plan.deferred[action.control_id] = "excluded in this machine's settings"
+            plan.actions = [a for a in plan.actions if a.control_id not in excluded]
+
+        if self.breaker.open:
+            cycle.halted = self.breaker.explain()
+            self._emit("cycle", "Changes are halted; reporting only", cycle.halted)
+        elif not plan.actions:
+            self._emit("cycle", "Nothing to change")
+        else:
+            self._apply(cycle, is_elevated())
+
+        cycle.finished_at = utcnow()
+        self.last_cycle = cycle
+        if not self.breaker.open:
+            self.breaker.record(cycle)
+
+        self._emit("cycle", cycle.summary_line(), self.breaker.explain())
+        log.info("cycle", f"Applied a plan decided elsewhere: {cycle.summary_line()}",
+                 cycle=cycle_id, fixed=len(cycle.fixed))
+        return cycle
+
     def _apply(self, cycle: Cycle, elevated: bool) -> None:
         ctx = Context(
             elevated=elevated,

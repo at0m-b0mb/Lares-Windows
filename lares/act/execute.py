@@ -148,6 +148,11 @@ class Executor:
         self._listener = listener
         #: Health reading from before the first change of this cycle.
         self.baseline: health_mod.Health | None = None
+        #: Whether a System Restore point has been attempted this cycle. The
+        #: snapshot module documented one per cycle as a coarse backstop and
+        #: nothing ever called it, which made the promise false rather than
+        #: best-effort.
+        self._restore_point_tried = False
 
     # -- plumbing -------------------------------------------------------
 
@@ -264,9 +269,25 @@ class Executor:
             return outcome
 
         # -- snapshot ------------------------------------------------------
+        # Once per cycle, before the first change, and only when System
+        # Protection is actually on - Checkpoint-Computer on a machine where
+        # it is off spends its whole timeout finding that out.
+        if not self._restore_point_tried and not self.dry_run:
+            self._restore_point_tried = True
+            if snapshot_mod.restore_point():
+                self._say(control.id, "snapshot", "took a system restore point")
+
         self._say(control.id, "snapshot", "capturing state before the change")
         snap = snapshot_mod.take(rendered, label=control.id)
         outcome.snapshot_id = snap.snapshot_id
+        if snap.ok and not snap.complete:
+            # Usable, so the change goes ahead - but the operator is told,
+            # because "state was captured" and "some of the state was
+            # captured" are different promises about what can be recovered.
+            self._say(control.id, "snapshot",
+                      f"captured only part of the state: {snap.summary()}")
+            logs.get().warn("act", "Partial snapshot before a change",
+                            control=control.id, detail=snap.summary())
         if not snap.ok and control.rollback_policy != "additive":
             outcome.status = Status.REFUSED
             outcome.refusal_reason = "state could not be captured before changing it"

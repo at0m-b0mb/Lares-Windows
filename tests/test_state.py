@@ -201,3 +201,61 @@ def test_the_desktop_application_starts_on_a_hand_edited_file(tmp_path, monkeypa
 
     window = Window(config_mod.load(), autostart=False)
     assert window.settings.budget == 8
+
+
+# --------------------------------------------------------------------------
+# A breaker is only worth having if it fails closed
+# --------------------------------------------------------------------------
+
+def test_a_trip_that_cannot_be_written_is_reported(tmp_path, monkeypatch):
+    """The return value used to be discarded, so a disk that refused the write
+    produced a breaker that came back armed: this process believed it had
+    halted and the next one read a file that said otherwise."""
+    monkeypatch.setattr(breaker_mod, "_path", lambda: tmp_path / "breaker.json")
+    monkeypatch.setattr(breaker_mod, "write_json_atomic", lambda p, d: False)
+
+    said = []
+    monkeypatch.setattr(breaker_mod.logs, "get",
+                        lambda: type("L", (), {
+                            "error": lambda self, *a, **k: said.append(a),
+                            "warn": lambda self, *a, **k: None,
+                            "info": lambda self, *a, **k: None})())
+
+    breaker = Breaker(threshold=2)
+    breaker.trip("something went wrong")
+
+    assert breaker.open, "this process must stay halted regardless"
+    assert said, "a breaker that could not be written must say so"
+
+
+def test_a_trip_survives_another_process_writing_over_it(tmp_path, monkeypatch):
+    """Whole-state last-writer-wins, and the loser of that race is a machine
+    that halted itself and then carried on."""
+    monkeypatch.setattr(breaker_mod, "_path", lambda: tmp_path / "breaker.json")
+
+    first = Breaker(threshold=2)
+    first.trip("first process halted")
+
+    second = Breaker(threshold=2)          # loaded before, unaware
+    second.trip("second process halted")
+
+    back = breaker_mod.load()
+    assert back.tripped
+    assert "first process halted" in back.reason
+    assert "second process halted" in back.reason
+
+
+def test_the_earlier_trip_time_is_the_one_kept(tmp_path, monkeypatch):
+    monkeypatch.setattr(breaker_mod, "_path", lambda: tmp_path / "breaker.json")
+
+    first = Breaker(threshold=2)
+    first.trip("earlier")
+    when = breaker_mod.load().tripped_at
+
+    Breaker(threshold=2).trip("later")
+    assert breaker_mod.load().tripped_at <= when
+
+
+def test_save_reports_whether_it_stuck(tmp_path, monkeypatch):
+    monkeypatch.setattr(breaker_mod, "_path", lambda: tmp_path / "breaker.json")
+    assert breaker_mod.save(State(tripped=True)) is True

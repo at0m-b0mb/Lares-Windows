@@ -130,6 +130,17 @@ class Settings:
         if not 1 <= self.breaker_threshold <= 10:
             fixed.append(f"breaker threshold {self.breaker_threshold} out of range; using 2")
             self.breaker_threshold = 2
+        # Control ids are upper-case everywhere else in the program, and this
+        # list is compared against them with ==. Someone who typed
+        # "lares config --set excluded=net-005" got a setting that displayed
+        # correctly on the settings screen, matched nothing, and silently
+        # stopped protecting the control they had asked to be left alone.
+        # Normalised here, once, rather than at each of the places that
+        # compares it.
+        tidy = [str(c).strip().upper() for c in self.excluded if str(c).strip()]
+        if tidy != self.excluded:
+            self.excluded = tidy
+
         if self.theme not in ("light", "dark", "auto"):
             fixed.append(f"theme {self.theme!r} unknown; using 'auto'")
             self.theme = "auto"

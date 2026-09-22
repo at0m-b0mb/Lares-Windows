@@ -383,3 +383,31 @@ def test_every_parameter_is_supplied_by_its_own_probe():
         for spec in control.params:
             assert spec.name in emitted, (
                 f"{control.id} needs '{spec.name}' but its probe never emits it")
+
+
+def test_the_readme_describes_the_domains_that_exist():
+    """The table claimed the services domain covered WinRM. No control does.
+
+    A security tool's list of what it checks is a promise about what it
+    checks, and a reader who believes WinRM is covered stops looking at WinRM.
+    """
+    import re
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(
+        encoding="utf-8")
+    catalog = loader.load()
+
+    rows = re.findall(r"^\| `(\w+)` \| (.+?) \|$", readme, re.M)
+    described = {domain for domain, _ in rows}
+    assert described == set(catalog.domains), described ^ set(catalog.domains)
+
+    corpus = " ".join(
+        f"{c.id} {c.title} {c.rationale} {c.detect} {c.remediate}" for c in catalog
+    ).lower()
+    for domain, claim in rows:
+        # Every capitalised noun phrase in a claim should be findable in the
+        # catalogue it describes.
+        for term in re.findall(r"\b(?:WinRM|SMBv1|LLMNR|BitLocker|LSASS|WDigest)\b", claim):
+            assert term.lower() in corpus, \
+                f"the {domain} row claims {term} and no control mentions it"

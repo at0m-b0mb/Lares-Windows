@@ -360,3 +360,60 @@ def test_a_failed_recording_does_not_cost_the_cycle(monkeypatch):
     agent, _ = build(config_mod.Settings(dry_run=True), CATALOG, with_model=False)
     cycle = agent.run_cycle()
     assert not cycle.halted, "a failed recording halted the cycle"
+
+
+# --------------------------------------------------------------------------
+# An undo is not drift
+# --------------------------------------------------------------------------
+
+def journal_at(tmp_path):
+    return Journal(path=tmp_path / "actions.jsonl")
+
+
+def applied(journal):
+    return sorted(drift_mod.applied_controls(journal))
+
+
+def test_a_deliberate_undo_is_not_reported_as_a_change_that_came_undone(tmp_path):
+    """A successful 'lares undo' is journalled as VERIFIED with the control's
+    own id. Reading status alone counted it as an application, re-probed it,
+    found the control non-compliant exactly as intended, and told the operator
+    their change had come undone."""
+    journal = journal_at(tmp_path)
+    journal.record(Outcome(control_id="NET-005", status=Status.VERIFIED,
+                           change_in_place=True))
+    assert applied(journal) == ["NET-005"]
+
+    journal.record(Outcome(control_id="NET-005", status=Status.VERIFIED,
+                           change_in_place=False), rationale="undo of act-1")
+    assert applied(journal) == []
+
+
+def test_an_older_undo_does_not_erase_a_newer_re_application(tmp_path):
+    """Entries arrive newest first, so the decision belongs to the newest."""
+    journal = journal_at(tmp_path)
+    for in_place in (True, False, True):
+        journal.record(Outcome(control_id="NET-005", status=Status.VERIFIED,
+                               change_in_place=in_place))
+    assert applied(journal) == ["NET-005"]
+    assert len(drift_mod.applied_controls(journal)["NET-005"]) == 2
+
+
+def test_a_refusal_after_an_application_decides_nothing(tmp_path):
+    journal = journal_at(tmp_path)
+    journal.record(Outcome(control_id="NET-005", status=Status.VERIFIED,
+                           change_in_place=True))
+    journal.record(Outcome(control_id="NET-005", status=Status.REFUSED))
+    assert applied(journal) == ["NET-005"]
+
+
+def test_an_entry_written_before_the_flag_existed_is_still_read(tmp_path):
+    """Judged the old way rather than silently dropped."""
+    import json
+
+    path = tmp_path / "actions.jsonl"
+    payload = {"at": "2026-01-01T00:00:00Z", "control_title": "old",
+               "outcome": {"control_id": "NET-005", "status": "verified",
+                           "rollback_script": "x", "params": {}}}
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    assert applied(Journal(path=path)) == ["NET-005"]

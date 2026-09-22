@@ -69,8 +69,19 @@ def test_the_readme_offers_the_dark_banner_to_dark_readers():
     assert "assets/banner-dark.png" in readme
 
 
+def prose_only(markdown: str) -> str:
+    """The README with code removed.
+
+    A path inside backticks or a fenced block is an example being shown, not a
+    reference being made - this test tripped on an <img src> quoted inside a
+    sentence explaining an attack.
+    """
+    without_blocks = re.sub(r"```.*?```", "", markdown, flags=re.S)
+    return re.sub(r"`[^`\n]*`", "", without_blocks)
+
+
 def test_every_file_the_readme_points_at_exists():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = prose_only((ROOT / "README.md").read_text(encoding="utf-8"))
     refs = (set(re.findall(r"\]\(([^)#][^)]*)\)", readme))
             | set(re.findall(r'srcset="([^"]+)"', readme))
             | set(re.findall(r'src="([^"]+)"', readme)))

